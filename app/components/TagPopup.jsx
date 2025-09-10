@@ -33,15 +33,15 @@ export default function TagPopup({ tagsData }) {
   };
 
   return (
-    <div className="mt-25 p-4">
-      <h1 className="text-2xl font-bold mb-4">Нажмите на тег</h1>
+    <div className="w-full h-full overflow-auto">
       <input
         type="text"
         value={searchTerm}
         onChange={handleInputChange}
         placeholder="Введите текст для поиска..."
-        className="mt-10 mb-10 w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="mb-5 w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
+      <h1 className="text-2xl font-bold mb-5">Нажмите на тег</h1>
       <div className="flex flex-wrap gap-2">
         {filteredData.map((tag) => (
           <button

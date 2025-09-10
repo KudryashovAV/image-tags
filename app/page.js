@@ -167,7 +167,7 @@ export default async function Home() {
   const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
 
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen mt-70 p-8 pb-20 gap-16 sm:p-20">
+    <div className="fixed top-[50px] left-[100px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
       <TagPopup tagsData={finalData} />
     </div> /* sss  */
   );
