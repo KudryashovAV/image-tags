@@ -99,7 +99,7 @@ export default function TagPopup({ tagsData }) {
                           </div>
                           <div class="flex items-center">
                             <span className="text-sm">How to obtain:</span>
-                            <p className="ml-1 text-black">{access_type}</p>
+                            <p className="ml-1 text-black">{access_type || "it's daily"}</p>
                           </div>
                         </a>
                       </div>
