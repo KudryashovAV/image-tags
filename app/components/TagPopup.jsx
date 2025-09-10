@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import Image from "next/image";
+import React, { useState, useMemo } from "react";
 
 export default function TagPopup({ tagsData }) {
+  const [searchTerm, setSearchTerm] = useState("");
   const [isPopupVisible, setIsPopupVisible] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
   const [selectedTag, setSelectedTag] = useState("");
@@ -20,21 +20,38 @@ export default function TagPopup({ tagsData }) {
     setSelectedTag("");
   };
 
+  const filteredData = useMemo(() => {
+    const data = Object.keys(tagsData).sort();
+
+    if (!searchTerm) return data;
+
+    return data.filter((item) => item.toLowerCase().includes(searchTerm.toLowerCase())).sort();
+  }, [tagsData, searchTerm]);
+
+  const handleInputChange = (e) => {
+    setSearchTerm(e.target.value);
+  };
+
   return (
-    <div className="p-4">
+    <div className="mt-25 p-4">
       <h1 className="text-2xl font-bold mb-4">Нажмите на тег</h1>
+      <input
+        type="text"
+        value={searchTerm}
+        onChange={handleInputChange}
+        placeholder="Введите текст для поиска..."
+        className="mt-10 mb-10 w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
       <div className="flex flex-wrap gap-2">
-        {Object.keys(tagsData)
-          .sort()
-          .map((tag) => (
-            <button
-              key={tag}
-              onClick={() => handleTagClick(tag)}
-              className="bg-blue-500 text-white font-semibold py-2 px-4 rounded-full shadow-lg hover:bg-blue-600 transition-colors"
-            >
-              {`${tag} (${tagsData[tag].length})`}
-            </button>
-          ))}
+        {filteredData.map((tag) => (
+          <button
+            key={tag}
+            onClick={() => handleTagClick(tag)}
+            className="bg-blue-500 text-white font-semibold py-2 px-4 rounded-full shadow-lg hover:bg-blue-600 transition-colors"
+          >
+            {`${tag} (${tagsData[tag].length})`}
+          </button>
+        ))}
       </div>
 
       {isPopupVisible && (
@@ -61,6 +78,7 @@ export default function TagPopup({ tagsData }) {
                 const url = parts[0];
                 const type = parts[1];
                 const id = parts[2];
+                const access_type = parts[3];
 
                 return (
                   <li key={index} class="bg-white rounded-lg shadow-md p-4 mb-2">
@@ -71,8 +89,18 @@ export default function TagPopup({ tagsData }) {
 
                       <div class="flex-grow">
                         <a href={url} target="_blank" class="text-blue-600 hover:text-blue-800 font-medium text-lg">
-                          <p className="text-black">{type}</p>
-                          <p className="text-black">{id}</p>
+                          <div class="flex items-center">
+                            <span className="text-sm">Type:</span>
+                            <p className="ml-1 text-black">{type}</p>
+                          </div>
+                          <div class="flex items-center">
+                            <span className="text-sm">ID:</span>
+                            <p className="ml-1 text-black">{id}</p>
+                          </div>
+                          <div class="flex items-center">
+                            <span className="text-sm">How to obtain:</span>
+                            <p className="ml-1 text-black">{access_type}</p>
+                          </div>
                         </a>
                       </div>
                     </div>

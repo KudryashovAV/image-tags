@@ -83,22 +83,92 @@ const showTagsWithIdFor = async (url, type, imageUrl) => {
   return tagsToIds;
 };
 
+const prepareId2 = (url, type, date_open, puzzle_start_price, id) => {
+  const originalString = date_open;
+
+  const parts = originalString.split("-");
+
+  const month = parts[1];
+  const year = parts[2];
+
+  const transformedString = `${url}${month}_${year}/${id}_Low.jpg|${type}|${id}|${puzzle_start_price}`;
+
+  return transformedString;
+};
+
+const showTagsWithIdFor2 = async (url, type, imageUrl) => {
+  const currentDate = new Date();
+  const fullYear = currentDate.getFullYear();
+  const lastTwoDigitsOfYear = fullYear % 100;
+
+  const years = getNumbersArrayUpToN(lastTwoDigitsOfYear);
+  const months = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
+
+  const dates = years
+    .map((year) => {
+      return months.map((month) => {
+        return `${month}_${year}`;
+      });
+    })
+    .flat();
+
+  const raw_images_data = await fetchSequentially(url, dates);
+
+  const all_images = [];
+  raw_images_data.map((data) => {
+    if (data.levels.length != 0) {
+      return all_images.push(data.levels);
+    }
+  });
+
+  const tagsToIds = all_images.flat().reduce((accumulator, currentObject) => {
+    currentObject.tags.forEach((tag) => {
+      if (!accumulator[tag]) {
+        accumulator[tag] = [];
+      }
+      accumulator[tag].push(
+        prepareId2(imageUrl, type, currentObject.date_open, currentObject.puzzle_start_price, currentObject.id)
+      );
+    });
+    return accumulator;
+  }, {});
+
+  return tagsToIds;
+};
+
+function mergeObjectsWithArrays(obj1, obj2) {
+  const result = { ...obj1 };
+
+  for (const [key, value] of Object.entries(obj2)) {
+    if (result[key]) {
+      result[key] = [...new Set([...result[key], ...value])];
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
 export default async function Home() {
   const tagsData = await showTagsWithIdFor(
     "https://storage.googleapis.com/malpa-static/jigsawgram/daily_config/levels_chunk_",
     "daily",
     "https://storage.googleapis.com/malpa-static/jigsawgram/daily/"
   );
-  // const tagsData2 = await showTagsWithIdFor(
-  //   "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles_config/levels_chunk_",
-  //   "puzzle",
-  //   "https://storage.googleapis.com/malpa-static/jigsawgram/daily/"
-  ("https://storage.googleapis.com/malpa-static/jigsawgram/puzzles/01_25/1655_Low.jpg");
-  // );
+  const tagsData2 = await showTagsWithIdFor2(
+    "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles_config/levels_chunk_",
+    "puzzle",
+    "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles/"
+  );
+
+  console.log("tagsData2", tagsData2);
+
+  const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
 
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen mt-35 p-8 pb-20 gap-16 sm:p-20">
-      <TagPopup tagsData={tagsData} />
-    </div>
+    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen mt-70 p-8 pb-20 gap-16 sm:p-20">
+      <TagPopup tagsData={finalData} />
+    </div> /* sss  */
   );
 }
