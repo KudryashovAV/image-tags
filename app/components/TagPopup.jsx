@@ -123,7 +123,11 @@ export default function TagPopup({ tagsData }) {
                       </div>
 
                       <div className="flex-grow">
-                        <a href={url} target="_blank" className="text-blue-600 hover:text-blue-800 font-medium text-lg">
+                        <a
+                          href={url.replace("QHD", "Low")}
+                          target="_blank"
+                          className="text-blue-600 hover:text-blue-800 font-medium text-lg"
+                        >
                           <div className="flex items-center">
                             <span className="text-sm">Type:</span>
                             <p className="ml-1 text-black">{type}</p>
