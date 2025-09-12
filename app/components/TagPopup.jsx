@@ -119,15 +119,11 @@ export default function TagPopup({ tagsData }) {
                   <li key={index} className="bg-white rounded-lg shadow-md p-4 mb-2">
                     <div className="flex items-center space-x-4">
                       <div>
-                        <img src={url} className="w-24 h-24 object-cover" />
+                        <img src={url.replace("QHD", "Low")} className="w-24 h-24 object-cover" />
                       </div>
 
                       <div className="flex-grow">
-                        <a
-                          href={url.replace("QHD", "Low")}
-                          target="_blank"
-                          className="text-blue-600 hover:text-blue-800 font-medium text-lg"
-                        >
+                        <a href={url} target="_blank" className="text-blue-600 hover:text-blue-800 font-medium text-lg">
                           <div className="flex items-center">
                             <span className="text-sm">Type:</span>
                             <p className="ml-1 text-black">{type}</p>
