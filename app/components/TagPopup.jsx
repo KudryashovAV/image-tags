@@ -1,24 +1,57 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 export default function TagPopup({ tagsData }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [isPopupVisible, setIsPopupVisible] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
   const [selectedTag, setSelectedTag] = useState("");
+  const popupRef = useRef(null);
 
   const handleTagClick = (tag) => {
     setSelectedTag(tag);
-    setSelectedItems(tagsData[tag]);
+    setSelectedItems(tagsData[tag] || []);
     setIsPopupVisible(true);
   };
 
-  const closePopup = () => {
+  const closePopup = useCallback(() => {
     setIsPopupVisible(false);
     setSelectedItems([]);
     setSelectedTag("");
-  };
+  }, []);
+
+  const handleEscapeKey = useCallback(
+    (event) => {
+      if (event.key === "Escape") {
+        closePopup();
+      }
+    },
+    [closePopup]
+  );
+
+  const handleClickOutside = useCallback(
+    (event) => {
+      if (popupRef.current && !popupRef.current.contains(event.target)) {
+        closePopup();
+      }
+    },
+    [closePopup]
+  );
+
+  useEffect(() => {
+    if (isPopupVisible) {
+      document.addEventListener("keydown", handleEscapeKey);
+      document.addEventListener("mousedown", handleClickOutside);
+      document.body.style.overflow = "hidden";
+    }
+
+    return () => {
+      document.removeEventListener("keydown", handleEscapeKey);
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.body.style.overflow = "unset";
+    };
+  }, [isPopupVisible, handleEscapeKey, handleClickOutside]);
 
   const filteredData = useMemo(() => {
     const data = Object.keys(tagsData).sort();
@@ -60,6 +93,7 @@ export default function TagPopup({ tagsData }) {
                  flex justify-center items-center z-50 p-4"
         >
           <div
+            ref={popupRef}
             className="bg-white rounded-lg shadow-2xl max-w-sm w-full h-full relative 
                    transform transition-all duration-300 scale-100 opacity-100
                    p-4 sm:p-6 max-h-[80vh] overflow-y-auto"
@@ -67,6 +101,7 @@ export default function TagPopup({ tagsData }) {
             <button
               onClick={closePopup}
               className="absolute top-2 right-2 text-gray-500 hover:text-white-800 text-2xl font-bold"
+              aria-label="Закрыть"
             >
               &times;
             </button>
@@ -81,23 +116,23 @@ export default function TagPopup({ tagsData }) {
                 const access_type = parts[3];
 
                 return (
-                  <li key={index} class="bg-white rounded-lg shadow-md p-4 mb-2">
-                    <div class="flex items-center space-x-4">
+                  <li key={index} className="bg-white rounded-lg shadow-md p-4 mb-2">
+                    <div className="flex items-center space-x-4">
                       <div>
-                        <img src={url} class="w-24 h-24 object-cover" />
+                        <img src={url} className="w-24 h-24 object-cover" />
                       </div>
 
-                      <div class="flex-grow">
-                        <a href={url} target="_blank" class="text-blue-600 hover:text-blue-800 font-medium text-lg">
-                          <div class="flex items-center">
+                      <div className="flex-grow">
+                        <a href={url} target="_blank" className="text-blue-600 hover:text-blue-800 font-medium text-lg">
+                          <div className="flex items-center">
                             <span className="text-sm">Type:</span>
                             <p className="ml-1 text-black">{type}</p>
                           </div>
-                          <div class="flex items-center">
+                          <div className="flex items-center">
                             <span className="text-sm">ID:</span>
                             <p className="ml-1 text-black">{id}</p>
                           </div>
-                          <div class="flex items-center">
+                          <div className="flex items-center">
                             <span className="text-sm">How to obtain:</span>
                             <p className="ml-1 text-black">{access_type || "it's daily"}</p>
                           </div>
@@ -108,6 +143,14 @@ export default function TagPopup({ tagsData }) {
                 );
               })}
             </ul>
+            <div className="flex justify-end mt-6 pt-4 border-t border-gray-200">
+              <button
+                onClick={closePopup}
+                className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
+              >
+                Закрыть
+              </button>
+            </div>
           </div>
         </div>
       )}

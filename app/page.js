@@ -40,7 +40,7 @@ const prepareId = (url, type, id) => {
 
   const lastTwoDigitsOfYear = year.substring(2);
 
-  const transformedString = `${url}${month}_${lastTwoDigitsOfYear}/${originalString}_Low.jpg|${type}|${originalString}`;
+  const transformedString = `${url}${month}_${lastTwoDigitsOfYear}/${originalString}_QHD.jpg|${type}|${originalString}`;
 
   return transformedString;
 };
@@ -91,7 +91,7 @@ const prepareId2 = (url, type, date_open, puzzle_start_price, id) => {
   const month = parts[1];
   const year = parts[2];
 
-  const transformedString = `${url}${month}_${year}/${id}_Low.jpg|${type}|${id}|${puzzle_start_price}`;
+  const transformedString = `${url}${month}_${year}/${id}_QHD.jpg|${type}|${id}|${puzzle_start_price}`;
 
   return transformedString;
 };
@@ -162,13 +162,11 @@ export default async function Home() {
     "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles/"
   );
 
-  console.log("tagsData2", tagsData2);
-
   const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
 
   return (
     <div className="fixed top-[50px] left-[100px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
       <TagPopup tagsData={finalData} />
-    </div> /* sss  */
+    </div>
   );
 }
