@@ -29,6 +29,28 @@ async function fetchSequentially(url, dates) {
   return results;
 }
 
+const isItFuture = (dateString) => {
+  const targetDate = new Date(dateString.replace(/_/g, "-"));
+  const today = new Date();
+
+  const targetDateOnly = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+  const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  return targetDateOnly.getTime() - todayOnly.getTime() > 0;
+};
+
+const isItFuture2 = (dateString) => {
+  const dateArray = dateString.split("-");
+
+  const targetDate = new Date(dateString);
+  const today = new Date();
+
+  const targetDateOnly = new Date("20" + dateArray[2], dateArray[1], dateArray[0]);
+  const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  return targetDateOnly.getTime() - todayOnly.getTime() > 0;
+};
+
 const prepareId = (url, type, id) => {
   const originalString = id;
 
@@ -36,11 +58,12 @@ const prepareId = (url, type, id) => {
 
   const year = parts[0];
   const month = parts[1];
-  const day = parts[2];
 
   const lastTwoDigitsOfYear = year.substring(2);
 
-  const transformedString = `${url}${month}_${lastTwoDigitsOfYear}/${originalString}_QHD.jpg|${type}|${originalString}`;
+  const transformedString = `${isItFuture(
+    originalString
+  )}|${url}${month}_${lastTwoDigitsOfYear}/${originalString}_QHD.jpg|${type}|${originalString}| |${originalString}`;
 
   return transformedString;
 };
@@ -91,7 +114,9 @@ const prepareId2 = (url, type, date_open, puzzle_start_price, id) => {
   const month = parts[1];
   const year = parts[2];
 
-  const transformedString = `${url}${month}_${year}/${id}_QHD.jpg|${type}|${id}|${puzzle_start_price}`;
+  const transformedString = `${isItFuture2(
+    date_open
+  )}|${url}${month}_${year}/${id}_QHD.jpg|${type}|${id}|${puzzle_start_price}|${date_open}`;
 
   return transformedString;
 };

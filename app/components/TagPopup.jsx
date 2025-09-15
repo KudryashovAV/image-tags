@@ -110,13 +110,18 @@ export default function TagPopup({ tagsData }) {
               {selectedItems.map((item, index) => {
                 const parts = item.split("|");
 
-                const url = parts[0];
-                const type = parts[1];
-                const id = parts[2];
-                const access_type = parts[3];
+                const isFuture = parts[0];
+                const url = parts[1];
+                const type = parts[2];
+                const id = parts[3];
+                const accessType = parts[4];
+                const releaseDate = parts[5];
 
                 return (
-                  <li key={index} className="bg-white rounded-lg shadow-md p-4 mb-2">
+                  <li
+                    key={index}
+                    className={`${isFuture == "true" ? "bg-green-100" : "bg-white"} rounded-lg shadow-md p-4 mb-2`}
+                  >
                     <div className="flex items-center space-x-4">
                       <div>
                         <img src={url.replace("QHD", "Low")} className="w-24 h-24 object-cover" />
@@ -134,7 +139,15 @@ export default function TagPopup({ tagsData }) {
                           </div>
                           <div className="flex items-center">
                             <span className="text-sm">How to obtain:</span>
-                            <p className="ml-1 text-black">{access_type || "it's daily"}</p>
+                            <p className="ml-1 text-black">{accessType || "it's daily"}</p>
+                          </div>
+                          <div className="flex items-center">
+                            <span className="text-xs">Release date:</span>
+                            <p className="ml-1 text-black">{releaseDate}</p>
+                          </div>
+                          <div className="flex items-center">
+                            <span className="text-xs">Is this for future:</span>
+                            <p className="ml-1 text-black">{isFuture == "true" ? "yes" : "no"}</p>
                           </div>
                         </a>
                       </div>
