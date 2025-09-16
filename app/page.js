@@ -40,12 +40,12 @@ const isItFuture = (dateString) => {
 };
 
 const isItFuture2 = (dateString) => {
-  const dateArray = dateString.split("-");
+  const date = dateString.split("-");
 
-  const targetDate = new Date(dateString);
+  const targetDate = new Date([date[1], date[0], date[2]].join("-"));
   const today = new Date();
 
-  const targetDateOnly = new Date("20" + dateArray[2], dateArray[1], dateArray[0]);
+  const targetDateOnly = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
   const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
   return targetDateOnly.getTime() - todayOnly.getTime() > 0;

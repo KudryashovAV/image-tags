@@ -120,7 +120,7 @@ export default function TagPopup({ tagsData }) {
                 return (
                   <li
                     key={index}
-                    className={`${isFuture == "true" ? "bg-green-100" : "bg-white"} rounded-lg shadow-md p-4 mb-2`}
+                    className={`${isFuture == "true" ? "bg-red-100" : "bg-white"} rounded-lg shadow-md p-4 mb-2`}
                   >
                     <div className="flex items-center space-x-4">
                       <div>
