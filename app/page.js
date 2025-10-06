@@ -15,7 +15,14 @@ async function fetchSequentially(url, dates) {
 
   const results = [];
   for (const url of urls) {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/json",
+      },
+    });
     let data = {};
 
     if (!response.ok) {
