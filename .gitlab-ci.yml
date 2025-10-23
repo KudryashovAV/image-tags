@@ -12,8 +12,8 @@ deploy:
     - set -euo pipefail
     - cd /home/omgadmin/image-tags
     - '[ -d .git ] || { git init; git symbolic-ref HEAD refs/heads/master; }'
-    - ENC_USER="${deploy_on_static_token:-}"
-    - GIT_PASSWORD="${deploy_on_static_var:-}"
+    - ENC_USER="${deploy_on_image_token:-}"
+    - GIT_PASSWORD="${deploy_on_image_var:-}"
   script:
     
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" master
