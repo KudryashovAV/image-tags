@@ -15,7 +15,5 @@ deploy:
     - ENC_USER="${deploy_on_image_token:-}"
     - GIT_PASSWORD="${deploy_on_image_var:-}"
   script:
-    
-    
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" master
     - git reset --hard FETCH_HEAD
