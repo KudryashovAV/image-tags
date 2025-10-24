@@ -6,13 +6,13 @@ deploy:
     GIT_STRATEGY: none
   resource_group: image-tags
   only: 
-    - master
+    - main
   before_script:
     - set -euo pipefail
     - cd /srv/image-tags
-    - '[ -d .git ] || { git init; git symbolic-ref HEAD refs/heads/master; }'
+    - '[ -d .git ] || { git init; git symbolic-ref HEAD refs/heads/main; }'
     - ENC_USER="${deploy_on_image_token:-}"
     - GIT_PASSWORD="${deploy_on_image_var:-}"
   script:
-    - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" master
+    - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" main
     - git reset --hard FETCH_HEAD
