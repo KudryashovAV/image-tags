@@ -9,7 +9,7 @@ deploy:
     - master
   before_script:
     - set -euo pipefail
-    - cd /home/omgadmin/image-tags
+    - cd /srv/image-tags
     - '[ -d .git ] || { git init; git symbolic-ref HEAD refs/heads/master; }'
     - ENC_USER="${deploy_on_image_token:-}"
     - GIT_PASSWORD="${deploy_on_image_var:-}"
