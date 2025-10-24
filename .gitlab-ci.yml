@@ -17,3 +17,4 @@ deploy:
   script:
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" master
     - git reset --hard FETCH_HEAD
+    
