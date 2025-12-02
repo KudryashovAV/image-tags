@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-export default function TagPopup({ tagsData }) {
+export default function Jigsawgram({ tagsData }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [isPopupVisible, setIsPopupVisible] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
