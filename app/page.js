@@ -1,4 +1,4 @@
-import TagPopup from "./components/TagPopup";
+import MainPage from "./components/MainPage";
 
 function getNumbersArrayUpToN(n) {
   const numbers = [];
@@ -182,7 +182,72 @@ function mergeObjectsWithArrays(obj1, obj2) {
   return result;
 }
 
+const fetchConfig = async () => {
+  const urls = [];
+  for (let i = 1; i <= 200; i++) {
+    urls.push(
+      `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/config_chapters/v1/config_chapter_${i}.json`
+    );
+  }
+
+  const results = [];
+  for (const url of urls) {
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/json",
+      },
+    });
+    let data = {};
+
+    if (!response.ok) {
+      break;
+    } else {
+      data = await response.json();
+    }
+
+    results.push(data);
+  }
+
+  const chapters = results.map((chapter) => {
+    const images = [
+      {
+        id: 0,
+        title: `Глава ${chapter.chapter_id} Главная`,
+        image_id: 0,
+        image_url: `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/textures_cards/v1/card_chapter_${chapter.chapter_id}.jpg`,
+      },
+    ];
+
+    console.log();
+
+    for (let i = 1; i <= 25; i++) {
+      const complexity = chapter.levels[i - 1]?.complexity;
+      const size = chapter.levels[i - 1]?.size;
+      const type = chapter.levels[i - 1]?.type;
+      const cards_sort = chapter.levels[i - 1]?.cards_sort?.join(",");
+      images.push({
+        id: chapter.chapter_id,
+        title: `Глава ${chapter.chapter_id} Уровень ${i}`,
+        image_id: i,
+        complexity: complexity,
+        size: size,
+        type: type,
+        cards_sort: cards_sort,
+        image_url: `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/textures_levels/v1/chapter_${chapter.chapter_id}/${i}.jpg`,
+      });
+    }
+
+    return images;
+  });
+
+  return chapters;
+};
+
 export default async function Home() {
+  const solitaireData = await fetchConfig();
   const tagsData = await showTagsWithIdFor(
     "https://storage.googleapis.com/malpa-static/jigsawgram/daily_config/levels_chunk_",
     "daily",
@@ -198,7 +263,7 @@ export default async function Home() {
 
   return (
     <div className="fixed top-[50px] left-[100px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
-      <TagPopup tagsData={finalData} />
+      <MainPage finalData={finalData} solitaireData={solitaireData} />
     </div>
   );
 }
