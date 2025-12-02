@@ -210,8 +210,37 @@ const fetchConfig = async () => {
 
     results.push(data);
   }
+
   const chapters = results.map((chapter) => {
-    return { id: chapter.chapter_id, title: `Глава ${chapter.chapter_id}` };
+    const images = [
+      {
+        id: 0,
+        title: `Глава ${chapter.chapter_id} Главная`,
+        image_id: 0,
+        image_url: `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/textures_cards/v1/card_chapter_${chapter.chapter_id}.jpg`,
+      },
+    ];
+
+    console.log();
+
+    for (let i = 1; i <= 25; i++) {
+      const complexity = chapter.levels[i - 1]?.complexity;
+      const size = chapter.levels[i - 1]?.size;
+      const type = chapter.levels[i - 1]?.type;
+      const cards_sort = chapter.levels[i - 1]?.cards_sort?.join(",");
+      images.push({
+        id: chapter.chapter_id,
+        title: `Глава ${chapter.chapter_id} Уровень ${i}`,
+        image_id: i,
+        complexity: complexity,
+        size: size,
+        type: type,
+        cards_sort: cards_sort,
+        image_url: `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/textures_levels/v1/chapter_${chapter.chapter_id}/${i}.jpg`,
+      });
+    }
+
+    return images;
   });
 
   return chapters;
