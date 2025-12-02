@@ -1,4 +1,4 @@
-import TagPopup from "./components/TagPopup";
+import MainPage from "./components/MainPage";
 
 function getNumbersArrayUpToN(n) {
   const numbers = [];
@@ -182,7 +182,43 @@ function mergeObjectsWithArrays(obj1, obj2) {
   return result;
 }
 
+const fetchConfig = async () => {
+  const urls = [];
+  for (let i = 1; i <= 200; i++) {
+    urls.push(
+      `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/config_chapters/v1/config_chapter_${i}.json`
+    );
+  }
+
+  const results = [];
+  for (const url of urls) {
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/json",
+      },
+    });
+    let data = {};
+
+    if (!response.ok) {
+      break;
+    } else {
+      data = await response.json();
+    }
+
+    results.push(data);
+  }
+  const chapters = results.map((chapter) => {
+    return { id: chapter.chapter_id, title: `Глава ${chapter.chapter_id}` };
+  });
+
+  return chapters;
+};
+
 export default async function Home() {
+  const solitaireData = await fetchConfig();
   const tagsData = await showTagsWithIdFor(
     "https://storage.googleapis.com/malpa-static/jigsawgram/daily_config/levels_chunk_",
     "daily",
@@ -198,7 +234,7 @@ export default async function Home() {
 
   return (
     <div className="fixed top-[50px] left-[100px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
-      <TagPopup tagsData={finalData} />
+      <MainPage finalData={finalData} solitaireData={solitaireData} />
     </div>
   );
 }
