@@ -260,7 +260,7 @@ const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
 
 export default async function Home() {
   return (
-    <div className="fixed top-[50px] left-[100px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
+    <div className="fixed top-[25px] left-[50px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
       <MainPage finalData={finalData} solitaireData={solitaireData} />
     </div>
   );

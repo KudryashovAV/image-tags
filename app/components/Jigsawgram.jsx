@@ -74,7 +74,7 @@ export default function Jigsawgram({ tagsData }) {
         placeholder="Введите текст для поиска..."
         className="mb-5 w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
-      <h1 className="text-2xl font-bold mb-5">Нажмите на тег</h1>
+      <h1 className="text-2xl text-black font-bold mb-5">Нажмите на тег</h1>
       <div className="flex flex-wrap gap-2">
         {filteredData.map((tag) => (
           <button
