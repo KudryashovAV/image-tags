@@ -29,7 +29,6 @@ const ImageGrid = ({ images }) => {
               </p>
             )}
 
-            {/* Контейнер изображения с ограничением высоты */}
             <div className="w-full relative overflow-hidden rounded-md">
               <img
                 src={item.image_url}
