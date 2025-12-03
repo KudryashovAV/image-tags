@@ -1,15 +1,22 @@
 import { NextResponse } from "next/server";
-import { NextRequest } from "next/server";
 
+/** @param {import("next/server").NextRequest} request */
 export function middleware(request) {
+  const { pathname } = request.nextUrl;
+
   if (
-    request.nextUrl.pathname.startsWith("/_next") ||
-    request.nextUrl.pathname.startsWith("/api/auth") ||
-    request.nextUrl.pathname.startsWith("/favicon.ico")
+    pathname.startsWith("/_next") ||     
+    pathname.startsWith("/api/auth") ||  
+    pathname.startsWith("/favicon.ico") ||
+    pathname.startsWith("/robots.txt") ||
+    pathname.startsWith("/sitemap.xml")
   ) {
     return NextResponse.next();
   }
 
+  if (!["GET", "HEAD"].includes(request.method)) {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
   const authHeader = request.headers.get("authorization");
 
   if (!authHeader) {
@@ -50,13 +57,6 @@ export function middleware(request) {
 
 export const config = {
   matcher: [
-    /*
-     * Match all request paths except for the ones starting with:
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
-     * - api/auth (auth endpoints)
-     */
-    "/((?!_next/static|_next/image|favicon.ico|api/auth).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|.*\\.[^/]+$).*)",
   ],
 };
