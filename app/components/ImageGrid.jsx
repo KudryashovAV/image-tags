@@ -25,7 +25,7 @@ const ImageGrid = ({ images }) => {
 
             {item.id != 0 && (
               <p className="text-sm font-semibold text-gray-700 mb-1 truncate w-full text-center">
-                Сложность: {item.complexity}, Нарезка: {item.size}
+                Сл: {item.complexity}, Р: {item.size}
               </p>
             )}
 
