@@ -16,3 +16,11 @@ deploy:
   script:
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" main
     - git reset --hard FETCH_HEAD
+    - echo "📦 Installing dependencies (npm ci --omit=dev)..."
+    - npm ci --omit=dev
+    - echo "🏗️  Building production bundle (next build)..."
+    - npm run build
+    - echo "🔁 Restarting app via PM2..."
+    - pm2 delete image-tags-app || true
+    - pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start
+    - pm2 save
