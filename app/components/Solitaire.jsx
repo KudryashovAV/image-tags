@@ -45,7 +45,7 @@ const Solitaire = ({ data }) => {
                   <span className="flex items-center justify-center w-6 h-6 md:w-8 md:h-8 bg-white/20 rounded-full text-white text-sm md:text-base font-bold">
                     {index + 1}
                   </span>
-                  <span className="text-white font-bold text-sm md:text-lg lg:text-xl text-left">Глава {itemId}</span>
+                  <span className="text-white font-bold text-sm md:text-lg lg:text-xl text-left">ГлавА {itemId}</span>
                 </div>
                 <span
                   className={`transform transition-transform duration-300 text-white text-xl md:text-2xl ${
