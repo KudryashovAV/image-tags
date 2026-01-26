@@ -1,4 +1,6 @@
+"use client";
 import React from "react";
+import ImageContent from "./ImageContent";
 
 const ImageGrid = ({ images }) => {
   return (
@@ -17,28 +19,7 @@ const ImageGrid = ({ images }) => {
         }}
       >
         {images.map((item, index) => (
-          <div
-            key={index}
-            className="flex m-3 flex-col items-center bg-white border border-gray-200 rounded-lg shadow-sm p-2"
-          >
-            <p className="text-sm font-semibold text-gray-700 mb-1 truncate w-full text-center">{item.title}</p>
-
-            {item.id != 0 && (
-              <p className="text-sm font-semibold text-gray-700 mb-1 truncate w-full text-center">
-                Сл: {item.complexity}, Р: {item.size}
-              </p>
-            )}
-
-            {/* Контейнер изображения с ограничением высоты */}
-            <div className="w-full relative overflow-hidden rounded-md">
-              <img
-                src={item.image_url}
-                alt={item.title}
-                className="w-full h-full object-contain cursor-pointer transition duration-300 hover:opacity-80"
-                onClick={() => window.open(item.url, "_blank")}
-              />
-            </div>
-          </div>
+          <ImageContent item={item} index={index} key={index} />
         ))}
       </div>
     </div>
