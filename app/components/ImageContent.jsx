@@ -83,6 +83,18 @@ const ImageContent = ({ item, index }) => {
           className="w-full h-full object-contain cursor-pointer transition duration-300 hover:opacity-80"
           onClick={() => (item.id != 0 ? setIsOpen(true) : setIsOpen(false))}
         />
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            opacity: 0.85,
+            backgroundImage: `
+            linear-gradient(to right, white 2px, transparent 2px),
+            linear-gradient(to bottom, white 2px, transparent 2px)
+          `,
+            backgroundSize: `calc(100% / ${squareRoot}) calc(100% / ${squareRoot})`,
+            backgroundPosition: "0 0, 0 0",
+          }}
+        ></div>
       </div>
 
       {isOpen && (
