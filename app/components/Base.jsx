@@ -69,7 +69,7 @@ const prepareId = (url, type, id) => {
   const lastTwoDigitsOfYear = year.substring(2);
 
   const transformedString = `${isItFuture(
-    originalString
+    originalString,
   )}|${url}${month}_${lastTwoDigitsOfYear}/${originalString}_QHD.jpg|${type}|${originalString}| |${originalString}`;
 
   return transformedString;
@@ -122,7 +122,7 @@ const prepareId2 = (url, type, date_open, puzzle_start_price, id) => {
   const year = parts[2];
 
   const transformedString = `${isItFuture2(
-    date_open
+    date_open,
   )}|${url}${month}_${year}/${id}_QHD.jpg|${type}|${id}|${puzzle_start_price}|${date_open}`;
 
   return transformedString;
@@ -159,7 +159,7 @@ const showTagsWithIdFor2 = async (url, type, imageUrl) => {
         accumulator[tag] = [];
       }
       accumulator[tag].push(
-        prepareId2(imageUrl, type, currentObject.date_open, currentObject.puzzle_start_price, currentObject.id)
+        prepareId2(imageUrl, type, currentObject.date_open, currentObject.puzzle_start_price, currentObject.id),
       );
     });
     return accumulator;
@@ -182,11 +182,67 @@ function mergeObjectsWithArrays(obj1, obj2) {
   return result;
 }
 
+const fetchConfig2 = () => {
+  function getTwoDigitsFromYear(n) {
+    const numbers = [];
+    for (let i = 26; i <= n; i++) {
+      numbers.push(i);
+    }
+    return numbers;
+  }
+
+  const currentDate = new Date();
+  const fullYear = currentDate.getFullYear();
+  const lastTwoDigitsOfYear = fullYear % 100;
+
+  const years = getTwoDigitsFromYear(lastTwoDigitsOfYear);
+  const months = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
+  const daysOfTheMonth = {
+    "01": 31,
+    "02": 29,
+    "03": 31,
+    "04": 30,
+    "05": 31,
+    "06": 30,
+    "07": 31,
+    "08": 31,
+    "09": 30,
+    10: 31,
+    11: 30,
+    12: 31,
+  };
+
+  const dates = years
+    .map((year) => {
+      return months.map((month) => {
+        // console.log(`daysOfTheMonth[${month}]`, daysOfTheMonth[month]);
+
+        return [`${year}_${month}`, daysOfTheMonth[month]];
+      });
+    })
+    .flat();
+
+  dates.unshift(["25_12", 31]);
+
+  const urls_data = Object.fromEntries(
+    dates.map(([key, maxNumber]) => [
+      key,
+      Array.from(
+        { length: maxNumber },
+        (_, i) =>
+          `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/daily_lvl/textures_levels/v1/${key}/${i + 1}.jpg`,
+      ),
+    ]),
+  );
+
+  return urls_data;
+};
+
 const fetchConfig = async () => {
   const urls = [];
   for (let i = 1; i <= 200; i++) {
     urls.push(
-      `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/config_chapters/v1/config_chapter_${i}.json`
+      `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/config_chapters/v1/config_chapter_${i}.json`,
     );
   }
 
@@ -245,15 +301,16 @@ const fetchConfig = async () => {
 };
 
 const solitaireData = await fetchConfig();
+const solitaireDailyData = await fetchConfig2();
 const tagsData = await showTagsWithIdFor(
   "https://storage.googleapis.com/malpa-static/jigsawgram/daily_config/levels_chunk_",
   "daily",
-  "https://storage.googleapis.com/malpa-static/jigsawgram/daily/"
+  "https://storage.googleapis.com/malpa-static/jigsawgram/daily/",
 );
 const tagsData2 = await showTagsWithIdFor2(
   "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles_config/levels_chunk_",
   "puzzle",
-  "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles/"
+  "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles/",
 );
 
 const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
@@ -261,7 +318,7 @@ const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
 export default async function Home() {
   return (
     <div className="fixed top-[25px] left-[50px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
-      <MainPage finalData={finalData} solitaireData={solitaireData} />
+      <MainPage finalData={finalData} solitaireData={solitaireData} solitaireDailyData={solitaireDailyData} />
     </div>
   );
 }
