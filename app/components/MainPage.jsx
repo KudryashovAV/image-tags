@@ -3,8 +3,9 @@
 import React, { useState, useEffect } from "react";
 import Jigsawgram from "./Jigsawgram";
 import Solitaire from "./Solitaire";
+import SolitaireDaily from "./SolitairDaily";
 
-const MainPage = ({ finalData, solitaireData }) => {
+const MainPage = ({ finalData, solitaireData, solitaireDailyData }) => {
   const [activeTab, setActiveTab] = useState("a");
   const [windowHeight, setWindowHeight] = useState(0);
 
@@ -71,6 +72,17 @@ const MainPage = ({ finalData, solitaireData }) => {
                 <span>Solitaire</span>
               </div>
             </button>
+            <button
+              className={getTabClasses("c")}
+              onClick={() => setActiveTab("c")}
+              aria-selected={activeTab === "c"}
+              role="tab"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <span className="hidden md:inline">🎴</span>
+                <span>Solitaire Daily</span>
+              </div>
+            </button>
           </div>
         </div>
       </div>
@@ -89,13 +101,19 @@ const MainPage = ({ finalData, solitaireData }) => {
           }}
         >
           <div className="h-full overflow-y-auto p-1 md:p-1 lg:p-1">
-            {activeTab === "a" ? (
+            {activeTab === "a" && (
               <div className="animate-fadeIn">
                 <Jigsawgram tagsData={finalData} />
               </div>
-            ) : (
+            )}{" "}
+            {activeTab === "b" && (
               <div className="animate-fadeIn">
                 <Solitaire data={solitaireData} />
+              </div>
+            )}
+            {activeTab === "c" && (
+              <div className="animate-fadeIn">
+                <SolitaireDaily data={solitaireDailyData} />
               </div>
             )}
           </div>
