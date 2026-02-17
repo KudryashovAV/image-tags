@@ -41,9 +41,7 @@ export async function GET(request) {
       },
     });
 
-    // console.log("crashesResponse.data", crashesResponse.data.rows[0].dimensions[0].stringValue);
-
-    return NextResponse.json(crashesResponse.data, { status: 200 });
+      return NextResponse.json(crashesResponse.data, { status: 200 });
   } catch (error) {
     return NextResponse.json(
       {

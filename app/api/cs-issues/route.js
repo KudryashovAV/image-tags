@@ -16,32 +16,129 @@ export async function GET(request) {
       auth: authClient,
     });
 
-    const now = new Date();
-    const yesterdayDate = new Date();
-    yesterdayDate.setDate(now.getDate() - 1);
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate());
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 1);
 
-    const crashesResponse = await developerReporting.vitals.crashrate.query({
-      name: "apps/com.openmygame.games.android.jigsaw.solitaire.puzzle/errorCountMetricSet",
+    const anrResponse = await developerReporting.vitals.anrrate.query({
+      name: "apps/com.openmygame.games.android.jigsaw.solitaire.puzzle/anrRateMetricSet",
       requestBody: {
         timelineSpec: {
-          aggregation_period: "DAILY",
+          aggregation_period: "HOURLY",
           startTime: {
-            day: yesterdayDate.getDate(),
-            month: yesterdayDate.getMonth() + 1,
-            year: yesterdayDate.getFullYear(),
+            day: startDate.getDate(),
+            month: startDate.getMonth() + 1,
+            year: startDate.getFullYear(),
           },
           endTime: {
-            day: now.getDate(),
-            month: now.getMonth() + 1,
-            year: now.getFullYear(),
+            day: endDate.getDate(),
+            month: endDate.getMonth() + 1,
+            year: endDate.getFullYear(),
           },
         },
-        dimensions: ["reportType"],
-        metrics: ["errorReportCount", "distinctUsers"],
+        dimensions: [
+          // "versionCode",
+          // "countryCode",
+          // "apiLevel",
+          // "deviceModel",
+          // "deviceBrand",
+          // "deviceType",
+          // "deviceRamBucket",
+          // "deviceSocMake",
+          // "deviceSocModel",
+          // "deviceCpuMake",
+          // "deviceCpuModel",
+          // "deviceGpuMake",
+          // "deviceGpuModel",
+          // "deviceGpuVersion",
+          // "deviceVulkanVersion",
+          // "deviceGlEsVersion",
+          // "deviceScreenSize",
+          // "deviceScreenDpi",
+        ],
+        metrics: [
+          "anrRate",
+          // "anrRate7dUserWeighted",
+          // "anrRate28dUserWeighted",
+          // "userPerceivedAnrRate",
+          // "userPerceivedAnrRate7dUserWeighted",
+          // "userPerceivedAnrRate28dUserWeighted",
+          // "distinctUsers",
+        ],
       },
     });
 
-    return NextResponse.json(crashesResponse.data, { status: 200 });
+    const crashesResponse = await developerReporting.vitals.crashrate.query({
+      name: "apps/com.openmygame.games.android.jigsaw.solitaire.puzzle/crashRateMetricSet",
+      requestBody: {
+        timelineSpec: {
+          aggregation_period: "HOURLY",
+          startTime: {
+            day: startDate.getDate(),
+            month: startDate.getMonth() + 1,
+            year: startDate.getFullYear(),
+          },
+          endTime: {
+            day: endDate.getDate(),
+            month: endDate.getMonth() + 1,
+            year: endDate.getFullYear(),
+          },
+        },
+        dimensions: [
+          // "versionCode",
+          // "countryCode",
+          // "apiLevel",
+          // "deviceModel",
+          // "deviceBrand",
+          // "deviceType",
+          // "deviceRamBucket",
+          // "deviceSocMake",
+          // "deviceSocModel",
+          // "deviceCpuMake",
+          // "deviceCpuModel",
+          // "deviceGpuMake",
+          // "deviceGpuModel",
+          // "deviceGpuVersion",
+          // "deviceVulkanVersion",
+          // "deviceGlEsVersion",
+          // "deviceScreenSize",
+          // "deviceScreenDpi",
+        ],
+        metrics: [
+          "crashRate",
+          // "userPerceivedCrashRate",
+          // "distinctUsers",
+        ],
+      },
+    });
+
+    const formatDate = (data) => {
+      const { year, month, day } = data.startTime;
+
+      return `${day}.${month}.${year}`;
+    };
+
+    const formatAnrMetric = (data) => {
+      const anrMetric = data.metrics.find((m) => m.metric === "anrRate");
+
+      return anrMetric ? parseFloat(anrMetric.decimalValue.value) : 0;
+    };
+
+    const formatCrashMetric = (data) => {
+      const crashMetric = data.metrics.find((m) => m.metric === "crashRate");
+
+      return crashMetric ? parseFloat(crashMetric.decimalValue.value) : 0;
+    };
+
+    return NextResponse.json(
+      {
+        date: formatDate(crashesResponse.data.rows[0]),
+        anrRate: formatAnrMetric(anrResponse.data.rows[0]),
+        crashRate: formatCrashMetric(crashesResponse.data.rows[0]),
+      },
+      { status: 200 },
+    );
   } catch (error) {
     return NextResponse.json(
       {
