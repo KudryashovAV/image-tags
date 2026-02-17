@@ -16,28 +16,29 @@ export async function GET(request) {
       auth: authClient,
     });
 
-    const now = new Date();
-    const yesterdayDate = new Date();
-    yesterdayDate.setDate(now.getDate() - 1);
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate() - 2);
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 3);
 
-    const crashesResponse = await developerReporting.vitals.crashrate.query({
-      name: "apps/com.openmygame.games.android.jigsawpuzzle/errorCountMetricSet",
+    const crashesResponse = await developerReporting.vitals.stuckbackgroundwakelockrate.query({
+      name: "apps/com.openmygame.games.android.jigsawpuzzle/slowRenderingRateMetricSet",
       requestBody: {
         timelineSpec: {
           aggregation_period: "DAILY",
           startTime: {
-            day: yesterdayDate.getDate(),
-            month: yesterdayDate.getMonth() + 1,
-            year: yesterdayDate.getFullYear(),
+            day: startDate.getDate(),
+            month: startDate.getMonth() + 1,
+            year: startDate.getFullYear(),
           },
           endTime: {
-            day: now.getDate(),
-            month: now.getMonth() + 1,
-            year: now.getFullYear(),
+            day: endDate.getDate(),
+            month: endDate.getMonth() + 1,
+            year: endDate.getFullYear(),
           },
         },
-        dimensions: ["reportType"],
-        metrics: ["errorReportCount", "distinctUsers"],
+        dimensions: [],
+        metrics: ["slowRenderingRate20Fps"],
       },
     });
 
