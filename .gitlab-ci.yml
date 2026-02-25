@@ -16,7 +16,7 @@ deploy:
   script:
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" main
     - cp $ENV_FILE .env
-    - cp $ENV_SYNH .env
+    - cat $ENV_SYNH >> .env
     - git reset --hard FETCH_HEAD
     - echo "📦 Installing dependencies (npm ci)..."
     - npm ci
