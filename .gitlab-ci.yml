@@ -15,8 +15,9 @@ deploy:
     - GIT_PASSWORD="${deploy_on_image_var:-}"
   script:
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" main
-    - cp $ENV_FILE .env
     - git reset --hard FETCH_HEAD
+    - cp $ENV_FILE .env
+    - cat $ENV_SYNH >> .env
     - echo "📦 Installing dependencies (npm ci)..."
     - npm ci
     - echo "🏗️  Building production bundle (next build)..."
