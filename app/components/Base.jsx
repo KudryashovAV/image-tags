@@ -1,4 +1,30 @@
 import MainPage from "./MainPage";
+import admin from "firebase-admin";
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(JSON.parse(process.env.CS_GOOGLE_SERVICE_ACCOUNT_KEY)),
+  });
+}
+
+const getChaptersConfig = async () => {
+  const template = await admin.remoteConfig().getTemplate();
+
+  return {
+    chapterUrl: JSON.parse(
+      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
+    ).url_config_chapters,
+    chaptersCount: JSON.parse(
+      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
+    ).count_chapters,
+    levelUrl: JSON.parse(
+      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
+    ).url_texture_level,
+    chapterImageUrl: JSON.parse(
+      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
+    ).url_texture_chapter,
+  };
+};
 
 function getNumbersArrayUpToN(n) {
   const numbers = [];
@@ -239,11 +265,15 @@ const fetchConfig2 = () => {
 };
 
 const fetchConfig = async () => {
+  const chapteData = await getChaptersConfig();
+
+  const chapterPath = chapteData.chapterUrl.replace("/config_chapter_{0}.json", "");
+  const levelPath = chapteData.levelUrl.replace("/chapter_{0}/{1}.jpg", "");
+  const chapterImagePath = chapteData.chapterImageUrl.replace("/card_chapter_{0}.jpg", "");
+
   const urls = [];
-  for (let i = 1; i <= 200; i++) {
-    urls.push(
-      `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/config_chapters/v1/config_chapter_${i}.json`,
-    );
+  for (let i = 1; i <= chapteData.chaptersCount; i++) {
+    urls.push(`${chapterPath}/config_chapter_${i}.json`);
   }
 
   const results = [];
@@ -273,7 +303,7 @@ const fetchConfig = async () => {
         id: 0,
         title: `Глава ${chapter.chapter_id} Главная`,
         image_id: 0,
-        image_url: `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/textures_cards/v1/card_chapter_${chapter.chapter_id}.jpg`,
+        image_url: `${chapterImagePath}/card_chapter_${chapter.chapter_id}.jpg`,
       },
     ];
 
@@ -290,7 +320,7 @@ const fetchConfig = async () => {
         size: size,
         type: type,
         cards_sort: cards_sort,
-        image_url: `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/chapters/textures_levels/v1/chapter_${chapter.chapter_id}/${i}.jpg`,
+        image_url: `${levelPath}/chapter_${chapter.chapter_id}/${i}.jpg`,
       });
     }
 
