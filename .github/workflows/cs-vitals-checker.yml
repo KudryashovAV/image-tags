@@ -1,7 +1,7 @@
 name: Cardscapes vitals checker
 on:
   schedule:
-    - cron: "0 8 * * 1-7"
+    - cron: "0 5 * * *"
 jobs:
   ping:
     runs-on: ubuntu-latest
