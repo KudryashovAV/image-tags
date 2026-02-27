@@ -19,8 +19,9 @@ deploy:
     - rm -f .env                        
     - cp $ENV_FILE .env
     - echo "" >> .env                 
-    - cat $ENV_SYNH >> .env           
-    - echo " .env created"
+    - cat $ENV_SYNH >> .env   
+    - echo "SLACK_HOOK=${SLACK_HOOK}" >> .env
+    - echo " .env created with Slack Hook"        
     - echo " Installing dependencies (npm ci)..."
     - npm ci
     - echo "🏗️  Building production bundle (next build)..."
