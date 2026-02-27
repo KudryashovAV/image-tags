@@ -1,4 +1,4 @@
-name: Evening image checker
+name: Morning image checker
 on:
   schedule:
     - cron: "0 5 * * *"
