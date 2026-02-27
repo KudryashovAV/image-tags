@@ -1,4 +1,4 @@
-name: Cardscapes vitals checker
+name: Cardscapes vitals checker new
 on:
   schedule:
     - cron: "0 5 * * *"
