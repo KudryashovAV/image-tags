@@ -27,12 +27,116 @@ const getChaptersConfig = async () => {
   };
 };
 
+const getEventsConfig = async () => {
+  const template = await admin.remoteConfig().getTemplate();
+
+  return {
+    config_levels: JSON.parse(template.parameters.js_resources_events.defaultValue.value).config_levels.url_config,
+    config_schedule: JSON.parse(template.parameters.js_resources_events.defaultValue.value).config_schedule.url_config,
+    url_texture_level: JSON.parse(template.parameters.js_resources_events.defaultValue.value).url_texture_level,
+  };
+};
+
+const fetchEventConfig = async (url) => {
+  const response = await fetch(url);
+  const data = await response.json();
+  return data;
+};
+
+function isDateInCurrentWeek(dateString) {
+  const parts = dateString.split(" ")[0].split(".");
+  const day = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10) - 1; // Месяцы в JS начинаются с 0
+  const year = parseInt(parts[2], 10);
+
+  const date = new Date(year, month, day);
+  const today = new Date();
+
+  const currentDayOfWeek = today.getDay();
+  let daysToMonday = currentDayOfWeek === 0 ? 6 : currentDayOfWeek - 1;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - daysToMonday);
+  monday.setHours(0, 0, 0, 0);
+
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  sunday.setHours(23, 59, 59, 999);
+
+  return date >= monday && date <= sunday;
+}
+
+const fetchEvents = async () => {
+  const eventsData = await getEventsConfig();
+  const eventConfig = eventsData.config_schedule;
+  const eventLevelsUrl = eventsData.url_texture_level;
+  const eventConfigUrl = eventsData.config_levels;
+  const currentYear = new Date().getFullYear();
+
+  const eventConfigPath = eventConfig.replace("/events_{0}.json", `/events_${currentYear}.json`);
+
+  const eventJsonConfig = await fetchEventConfig(eventConfigPath);
+
+  const events = eventJsonConfig.events_base.map((item, index) => ({
+    id: item.id,
+    time_start: item.time_start,
+    index: index,
+  }));
+
+  const currentWeekEvent = events.find((item) => isDateInCurrentWeek(item.time_start));
+
+  const nearEvents = events.slice(currentWeekEvent.index, parseInt(currentWeekEvent.index) + 4); // хочу 4 ивента, один текущий и три в будущем. Нужно проверить, если их нет, то нужно оповестить об этом в сообщении
+  const nearEventsIds = nearEvents.map((item) => item.id);
+  const brokenEvents = []; // если массив не пуст - беда
+  const eventsWithoutConfig = []; // если массив не пуст - беда
+
+  for (const eventName of nearEventsIds) {
+    await checkIfAllEventsLevelsPersists(eventLevelsUrl, eventName, brokenEvents);
+  }
+
+  for (const eventName of nearEventsIds) {
+    await checkIfAllEventsConfigPersists(eventConfigUrl, eventName, eventsWithoutConfig);
+  }
+
+  if (brokenEvents.length > 0) {
+    return `Так же проверены события. События с ID ${nearEventsIds} имеют недостающие уровни или обложку`;
+  } else if (eventsWithoutConfig.length > 0) {
+    return `Так же проверены события. События с ID ${nearEventsIds} имеют недостающий конфиг`;
+  } else if (brokenEvents.length === 0 && eventsWithoutConfig.length === 0 && nearEventsIds.length < 4) {
+    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 35 уровней и одна обложка. Только ближайшие ${nearEventsIds.length} недель имеют события. Обратите внимание, что нужно ещё хотя бы ${4 - nearEventsIds.length} событий в запасе!`;
+  } else {
+    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 35 уровней и одна обложка.`;
+  }
+};
+
+const checkIfAllEventsLevelsPersists = async (url, eventName, brokenEvents) => {
+  for (let x = 1; x <= 36; x++) {
+    const levelStatus = await checkStatus(url.replace("/{0}/{1}.jpg", `/${eventName}/${x}.jpg`));
+
+    if (levelStatus != 200 || levelStatus != "200") {
+      brokenEvents.push(eventName);
+    }
+  }
+  const coverStatus = await checkStatus(url.replace("/{0}/{1}.jpg", `/${eventName}/card_1.jpg`));
+  if (coverStatus != 200 || coverStatus != "200") {
+    brokenEvents.push(eventName);
+  }
+};
+
+const checkIfAllEventsConfigPersists = async (url, eventName, eventsWithoutConfig) => {
+  const configStatus = await checkStatus(url.replace("/event_{0}.json", `/event_${eventName}.json`));
+
+  if (configStatus != 200 || configStatus != "200") {
+    eventsWithoutConfig.push(eventName);
+  }
+};
+
 async function checkStatus(url) {
   try {
     const response = await fetch(url, {
       method: "HEAD",
       cache: "no-cache",
     });
+
     return response.status;
   } catch (error) {
     return "Error 404";
@@ -106,18 +210,16 @@ export async function GET() {
     const chaptersCount = chapteData.chaptersCount;
     const chapterUrl = chapteData.chapterUrl;
 
-    // const startTime = new Date();
     const brockenChapters = await fetchConfig();
     const finishTime = new Date();
 
-    // console.log("start", formatDateTime(startTime));
-    // console.log("finish", formatDateTime(finishTime));
+    const wrapMessage = async () => {
+      const eventsCheckerResult = await fetchEvents();
 
-    const wrapMessage = () => {
       if (brockenChapters.length > 0) {
-        return `Некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+        return `Некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
       } else {
-        return `Проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+        return `Проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
       }
     };
 
@@ -126,11 +228,16 @@ export async function GET() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          BrokenChapters: `${wrapMessage()}`,
+          BrokenChapters: `${await wrapMessage()}`,
         }),
       });
 
       if (!slackResponse.ok) throw new Error("Slack API error");
+
+      // return NextResponse.json({
+      //   success: true,
+      //   sent: await wrapMessage(),
+      // });
 
       return NextResponse.json({
         success: true,
