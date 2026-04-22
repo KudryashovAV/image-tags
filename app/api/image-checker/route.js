@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import admin from "firebase-admin";
+import { getChaptersLevels } from "../levels-checker/route";
 // import { Storage } from "@google-cloud/storage";
 
 if (!admin.apps.length) {
@@ -213,22 +214,32 @@ export async function GET() {
     const brockenChapters = await fetchConfig();
     const finishTime = new Date();
 
-    const wrapMessage = async () => {
-      const eventsCheckerResult = await fetchEvents();
+    const newChaptersResponse = await getChaptersLevels();
+    const newChaptersData = await newChaptersResponse.json();
 
-      if (brockenChapters.length > 0) {
-        return `Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
-      } else {
-        return `Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
-      }
-    };
+    const newChaptersBadMessage = `Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
+    const newChaptersGoodMessage = `Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
+
+    const oldChaptersBadMessage = `Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+    const oldChaptersGoodMessage = `Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+    // const wrapMessage = async () => {
+    //   const eventsCheckerResult = await fetchEvents();
+
+    //   if (brockenChapters.length > 0) {
+    //     return `${oldChaptersBadMessage}\n ${newChaptersBadMessage}\n ${eventsCheckerResult}`;
+    //   } else {
+    //     return `${oldChaptersGoodMessage}\n ${newChaptersGoodMessage}\n ${eventsCheckerResult}`;
+    //   }
+    // };
 
     try {
       const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          BrokenChapters: `${await wrapMessage()}`,
+          OldBrokenChapters: `${brockenChapters.length > 0 ? oldChaptersBadMessage : oldChaptersGoodMessage}`,
+          NewBrokenChapters: `${newChaptersData.brokenChapters.length > 0 ? newChaptersBadMessage : newChaptersGoodMessage}`,
+          events: await fetchEvents(),
         }),
       });
 

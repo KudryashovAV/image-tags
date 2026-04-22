@@ -6,7 +6,7 @@ import Solitaire from "./Solitaire";
 import SolitaireDaily from "./SolitairDaily";
 import CardscapesEvents from "./CardscapesEvents";
 
-const MainPage = ({ finalData, solitaireData, solitaireDailyData, CardscapesEventsData }) => {
+const MainPage = ({ finalData, solitaireData, solitaireDailyData, CardscapesEventsData, CardscapesChapersData }) => {
   const [activeTab, setActiveTab] = useState("a");
   const [windowHeight, setWindowHeight] = useState(0);
 
@@ -70,7 +70,18 @@ const MainPage = ({ finalData, solitaireData, solitaireDailyData, CardscapesEven
             >
               <div className="flex items-center justify-center gap-2">
                 <span className="hidden md:inline">🎴</span>
-                <span>Cardscapes Levels</span>
+                <span>Cardscapes Levels 1.10</span>
+              </div>
+            </button>
+            <button
+              className={getTabClasses("e")}
+              onClick={() => setActiveTab("e")}
+              aria-selected={activeTab === "e"}
+              role="tab"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <span className="hidden md:inline">🎴</span>
+                <span>Cardscapes Levels 1.11</span>
               </div>
             </button>
             <button
@@ -131,6 +142,11 @@ const MainPage = ({ finalData, solitaireData, solitaireDailyData, CardscapesEven
             {activeTab === "d" && (
               <div className="animate-fadeIn">
                 <CardscapesEvents data={CardscapesEventsData} />
+              </div>
+            )}
+            {activeTab === "e" && (
+              <div className="animate-fadeIn">
+                <Solitaire data={CardscapesChapersData} />
               </div>
             )}
           </div>
