@@ -1,5 +1,7 @@
 import MainPage from "./MainPage";
 import admin from "firebase-admin";
+import { GET } from "../api/events-checker/route";
+import { getChaptersData } from "../api/levels-checker/route";
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -345,10 +347,24 @@ const tagsData2 = await showTagsWithIdFor2(
 
 const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
 
+const eventsResponse = await GET();
+const eventsData = await eventsResponse.json();
+
+const chaptersResponse = await getChaptersData();
+const chaptersData = await chaptersResponse.json();
+
+// console.log("chaptersDatas", chaptersData);
+
 export default async function Home() {
   return (
     <div className="fixed top-[25px] left-[50px] w-[calc(100vw-100px)] h-[calc(100vh-70px)]">
-      <MainPage finalData={finalData} solitaireData={solitaireData} solitaireDailyData={solitaireDailyData} />
+      <MainPage
+        finalData={finalData}
+        solitaireData={solitaireData}
+        solitaireDailyData={solitaireDailyData}
+        CardscapesEventsData={eventsData}
+        CardscapesChapersData={chaptersData}
+      />
     </div>
   );
 }

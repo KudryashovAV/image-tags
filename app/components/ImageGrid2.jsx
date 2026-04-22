@@ -18,9 +18,16 @@ const ImageGrid2 = ({ images }) => {
           overflowY: "auto", // Включаем скролл, если изображений слишком много, но пытаемся ограничить высоту
         }}
       >
-        {images.map((item, index) => (
-          <img src={item} key={index} />
-        ))}
+        {images.map((item, index) =>
+          item.includes("card_1") ? (
+            <div key={index} className="flex flex-col">
+              <div className="p-4 font-bold text-black">Открытка</div>
+              <img src={item} alt="" className="w-full" />
+            </div>
+          ) : (
+            <img src={item} key={index} />
+          ),
+        )}
       </div>
     </div>
   );
