@@ -102,9 +102,9 @@ const fetchEvents = async () => {
   } else if (eventsWithoutConfig.length > 0) {
     return `Так же проверены события. События с ID ${nearEventsIds} имеют недостающий конфиг`;
   } else if (brokenEvents.length === 0 && eventsWithoutConfig.length === 0 && nearEventsIds.length < 4) {
-    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 35 уровней и одна обложка. Только ближайшие ${nearEventsIds.length} недель имеют события. Обратите внимание, что нужно ещё хотя бы ${4 - nearEventsIds.length} событий в запасе!`;
+    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и одна обложка. Только ближайшие ${nearEventsIds.length} недель имеют события. Обратите внимание, что нужно ещё хотя бы ${4 - nearEventsIds.length} событий в запасе!`;
   } else {
-    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 35 уровней и одна обложка.`;
+    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и одна обложка.`;
   }
 };
 
@@ -217,9 +217,9 @@ export async function GET() {
       const eventsCheckerResult = await fetchEvents();
 
       if (brockenChapters.length > 0) {
-        return `Некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
+        return `Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
       } else {
-        return `Проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
+        return `Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}. ${eventsCheckerResult}`;
       }
     };
 

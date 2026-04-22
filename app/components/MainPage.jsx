@@ -4,8 +4,9 @@ import React, { useState, useEffect } from "react";
 import Jigsawgram from "./Jigsawgram";
 import Solitaire from "./Solitaire";
 import SolitaireDaily from "./SolitairDaily";
+import CardscapesEvents from "./CardscapesEvents";
 
-const MainPage = ({ finalData, solitaireData, solitaireDailyData }) => {
+const MainPage = ({ finalData, solitaireData, solitaireDailyData, CardscapesEventsData }) => {
   const [activeTab, setActiveTab] = useState("a");
   const [windowHeight, setWindowHeight] = useState(0);
 
@@ -69,7 +70,7 @@ const MainPage = ({ finalData, solitaireData, solitaireDailyData }) => {
             >
               <div className="flex items-center justify-center gap-2">
                 <span className="hidden md:inline">🎴</span>
-                <span>Solitaire</span>
+                <span>Cardscapes Levels</span>
               </div>
             </button>
             <button
@@ -80,7 +81,18 @@ const MainPage = ({ finalData, solitaireData, solitaireDailyData }) => {
             >
               <div className="flex items-center justify-center gap-2">
                 <span className="hidden md:inline">🎴</span>
-                <span>Solitaire Daily</span>
+                <span>Cardscapes Daily</span>
+              </div>
+            </button>
+            <button
+              className={getTabClasses("d")}
+              onClick={() => setActiveTab("d")}
+              aria-selected={activeTab === "d"}
+              role="tab"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <span className="hidden md:inline">🎴</span>
+                <span>Cardscapes Events</span>
               </div>
             </button>
           </div>
@@ -114,6 +126,11 @@ const MainPage = ({ finalData, solitaireData, solitaireDailyData }) => {
             {activeTab === "c" && (
               <div className="animate-fadeIn">
                 <SolitaireDaily data={solitaireDailyData} />
+              </div>
+            )}
+            {activeTab === "d" && (
+              <div className="animate-fadeIn">
+                <CardscapesEvents data={CardscapesEventsData} />
               </div>
             )}
           </div>
