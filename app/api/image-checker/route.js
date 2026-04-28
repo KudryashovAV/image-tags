@@ -83,10 +83,34 @@ const fetchEvents = async () => {
     index: index,
   }));
 
-  const currentWeekEvent = events.find((item) => isDateInCurrentWeek(item.time_start));
+  function getEventsForNextWeeks(events) {
+    const now = new Date();
 
-  const nearEvents = events.slice(currentWeekEvent.index, parseInt(currentWeekEvent.index) + 4); // хочу 4 ивента, один текущий и три в будущем. Нужно проверить, если их нет, то нужно оповестить об этом в сообщении
-  const nearEventsIds = nearEvents.map((item) => item.id);
+    // Получаем начало текущей недели (понедельник)
+    const currentDay = now.getDay();
+    const mondayOffset = currentDay === 0 ? 6 : currentDay - 1;
+    const startOfCurrentWeek = new Date(now);
+    startOfCurrentWeek.setDate(now.getDate() - mondayOffset);
+    startOfCurrentWeek.setHours(0, 0, 0, 0);
+
+    // Конец 3й недели от текущей (через 4 недели)
+    const endOfFourthWeek = new Date(startOfCurrentWeek);
+    endOfFourthWeek.setDate(startOfCurrentWeek.getDate() + 4 * 7 - 1); // 27 дней
+    endOfFourthWeek.setHours(23, 59, 59, 999);
+
+    // Фильтруем события
+    return events.filter((event) => {
+      // Парсим дату из строки '25.05.2026 00:01:00'
+      const [datePart] = event.time_start.split(" ");
+      const [day, month, year] = datePart.split(".");
+      const eventDate = new Date(year, month - 1, day);
+
+      return eventDate >= startOfCurrentWeek && eventDate <= endOfFourthWeek;
+    });
+  }
+
+  const nearEventsIds = getEventsForNextWeeks(events).map((item) => item.id);
+
   const brokenEvents = []; // если массив не пуст - беда
   const eventsWithoutConfig = []; // если массив не пуст - беда
 
