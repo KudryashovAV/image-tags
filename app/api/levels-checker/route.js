@@ -114,6 +114,12 @@ const fetchChaptersData = async () => {
         image_id: 0,
         image_url: `${chapterImagePath}/card_chapter_${chapter.chapter_id}.jpg`,
       },
+      {
+        id: -1,
+        title: `Глава ${chapter.chapter_id} Главная LOW`,
+        image_id: -1,
+        image_url: `${chapterImagePath}/card_chapter_${chapter.chapter_id}_low.jpg`,
+      },
     ];
 
     for (let i = 1; i <= 25; i++) {
