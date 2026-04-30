@@ -203,80 +203,48 @@ export async function GET() {
   try {
     const template = await admin.remoteConfig().getTemplate();
 
-    // const storage = new Storage({
-    //   // Используем тот же JSON-ключ из переменной окружения
-    //   credentials: JSON.parse(process.env.CS_GOOGLE_SERVICE_ACCOUNT_KEY),
-    // });
-    // console.log("Использую аккаунт:", storage.authClient);
+    function formatDateTime(date) {
+      const hours = String(date.getHours()).padStart(2, "0");
+      const minutes = String(date.getMinutes()).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      const month = String(date.getMonth() + 1).padStart(2, "0"); // +1 потому что месяцы с 0
+      const year = date.getFullYear();
 
-    // const bucketName = "malpa-static"; // Имя вашей корзины
-    // const folderPath = "jigsaw_solitaire/chapters/textures_levels/v1/chapter_1/";
+      return `${hours}:${minutes} ${day}-${month}-${year}`;
+    }
 
-    // const [files] = await storage.bucket(bucketName).getFiles({
-    //   prefix: folderPath,
-    // });
-    // const fileCount = files.filter((file) => file.name !== folderPath).length;
+    const configValues = {};
+    Object.entries(template.parameters).forEach(([key, value]) => {
+      configValues[key] = value.defaultValue.value;
+    });
+    const chapteData = await getChaptersConfig();
+    const chaptersCount = chapteData.chaptersCount;
+    const chapterUrl = chapteData.chapterUrl;
 
-    // console.log("asdasdasdasd", { success: true, folder: folderPath, count: fileCount });
+    const brockenChapters = await fetchConfig();
+    const finishTime = new Date();
 
-    // -------------------
+    const newChaptersResponse = await getChaptersLevels();
+    const newChaptersData = await newChaptersResponse.json();
 
-    // function formatDateTime(date) {
-    //   const hours = String(date.getHours()).padStart(2, "0");
-    //   const minutes = String(date.getMinutes()).padStart(2, "0");
-    //   const day = String(date.getDate()).padStart(2, "0");
-    //   const month = String(date.getMonth() + 1).padStart(2, "0"); // +1 потому что месяцы с 0
-    //   const year = date.getFullYear();
+    const newChaptersBadMessage = `Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
+    const newChaptersGoodMessage = `Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
 
-    //   return `${hours}:${minutes} ${day}-${month}-${year}`;
-    // }
-
-    // const configValues = {};
-    // Object.entries(template.parameters).forEach(([key, value]) => {
-    //   configValues[key] = value.defaultValue.value;
-    // });
-    // const chapteData = await getChaptersConfig();
-    // const chaptersCount = chapteData.chaptersCount;
-    // const chapterUrl = chapteData.chapterUrl;
-
-    // const brockenChapters = await fetchConfig();
-    // const finishTime = new Date();
-
-    // const newChaptersResponse = await getChaptersLevels();
-    // const newChaptersData = await newChaptersResponse.json();
-
-    // const newChaptersBadMessage = `Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
-    // const newChaptersGoodMessage = `Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
-
-    // const oldChaptersBadMessage = `Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
-    // const oldChaptersGoodMessage = `Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
-    // const wrapMessage = async () => {
-    //   const eventsCheckerResult = await fetchEvents();
-
-    //   if (brockenChapters.length > 0) {
-    //     return `${oldChaptersBadMessage}\n ${newChaptersBadMessage}\n ${eventsCheckerResult}`;
-    //   } else {
-    //     return `${oldChaptersGoodMessage}\n ${newChaptersGoodMessage}\n ${eventsCheckerResult}`;
-    //   }
-    // };
+    const oldChaptersBadMessage = `Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+    const oldChaptersGoodMessage = `Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
 
     try {
       const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          // OldBrokenChapters: `${brockenChapters.length > 0 ? oldChaptersBadMessage : oldChaptersGoodMessage}`,
-          // NewBrokenChapters: `${newChaptersData.brokenChapters.length > 0 ? newChaptersBadMessage : newChaptersGoodMessage}`,
+          OldBrokenChapters: `${brockenChapters.length > 0 ? oldChaptersBadMessage : oldChaptersGoodMessage}`,
+          NewBrokenChapters: `${newChaptersData.brokenChapters.length > 0 ? newChaptersBadMessage : newChaptersGoodMessage}`,
           events: await fetchEvents(),
         }),
       });
 
       if (!slackResponse.ok) throw new Error("Slack API error");
-
-      // return NextResponse.json({
-      //   success: true,
-      //   sent: await wrapMessage(),
-      // });
 
       return NextResponse.json({
         success: true,
