@@ -227,11 +227,11 @@ export async function GET() {
     const newChaptersResponse = await getChaptersLevels();
     const newChaptersData = await newChaptersResponse.json();
 
-    const newChaptersBadMessage = `Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
-    const newChaptersGoodMessage = `Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
+    const newChaptersBadMessage = `ВСЁ ПЛОХО! (( Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
+    const newChaptersGoodMessage = `ВСЁ ОК! Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
 
-    const oldChaptersBadMessage = `Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
-    const oldChaptersGoodMessage = `Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+    const oldChaptersBadMessage = `ВСЁ ПЛОХО! (( Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
+    const oldChaptersGoodMessage = `ВСЁ ОК! Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
 
     try {
       const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
