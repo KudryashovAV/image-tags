@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { formatDate, ANRHourlyChecker, CrachesHourlyChecker } from "../../services/fetchVitals";
-
+import { getFatals } from "../api/fatal-issues/route";
+import { getAnrs } from "../api/anr-issues/route";
 export async function GET(request) {
   try {
     const endDate = new Date(Date.now() - 86400000);
@@ -54,11 +55,16 @@ export async function GET(request) {
     ${formatDate(twoDaysAgoStartDate)}: ${JSON.stringify({ anrRate: twoDaysAgoAnrResponse, crashRate: twoDaysAgoCrashesResponse })},
     `;
 
+    const fatalsInfo = await getFatals();
+    const anrsInfo = await getAnrs();
+
     const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        BrokenChapters: slackMessage,
+        OldBrokenChapters: fatalsInfo,
+        NewBrokenChapters: anrsInfo,
+        events: slackMessage,
       }),
     });
 
