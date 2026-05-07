@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { formatDate, ANRHourlyChecker, CrachesHourlyChecker } from "../../services/fetchVitals";
-import { getFatals } from "../api/fatal-issues/route";
-import { getAnrs } from "../api/anr-issues/route";
+import { getFatals } from "../fatal-issues/route";
+import { getAnrs } from "../anr-issues/route";
 export async function GET(request) {
   try {
     const endDate = new Date(Date.now() - 86400000);
