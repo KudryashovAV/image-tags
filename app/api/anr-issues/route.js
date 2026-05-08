@@ -81,7 +81,7 @@ const anrReportString = ` ANRs - всего ${anrsIssues.length}, полный �
 
 export async function GET(request) {
   try {
-    return NextResponse.json(anrReportString);
+    return NextResponse.json(anrSortedData);
   } catch (error) {
     return NextResponse.json(
       {
