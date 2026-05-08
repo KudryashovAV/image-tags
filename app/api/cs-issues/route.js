@@ -55,8 +55,11 @@ export async function GET(request) {
     ${formatDate(twoDaysAgoStartDate)}: ${JSON.stringify({ anrRate: twoDaysAgoAnrResponse, crashRate: twoDaysAgoCrashesResponse })},
     `;
 
-    const fatalsInfo = await getFatals();
-    const anrsInfo = await getAnrs();
+    const fatalsData = await getFatals();
+    const anrsData = await getAnrs();
+
+    const fatalsInfo = await fatalsData.json();
+    const anrsInfo = await anrsData.json();
 
     const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
       method: "POST",
@@ -72,9 +75,9 @@ export async function GET(request) {
 
     return NextResponse.json(
       {
-        [formatDate(startDate)]: { anrRate: anrResponse, crashRate: crashesResponse },
-        [formatDate(yesterdayStartDate)]: { anrRate: yesterdayAnrResponse, crashRate: yesterdayCrashesResponse },
-        [formatDate(twoDaysAgoStartDate)]: { anrRate: twoDaysAgoAnrResponse, crashRate: twoDaysAgoCrashesResponse },
+        OldBrokenChapters: fatalsInfo,
+        NewBrokenChapters: anrsInfo,
+        events: slackMessage,
       },
       { status: 200 },
     );
