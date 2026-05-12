@@ -22,6 +22,8 @@ deploy:
     - cat $ENV_SYNH >> .env   
     - echo "" >> .env 
     - cat $SLACK_HOOK >> .env
+    - echo "" >> .env 
+    - cat $TECH_SLACK_WEBHOOK_UR >> .env
     - echo " .env created with Slack Hook"        
     - echo " Installing dependencies (npm ci)..."
     - npm ci
