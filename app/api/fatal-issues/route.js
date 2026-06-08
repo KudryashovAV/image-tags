@@ -1,3 +1,4 @@
+export const dynamic = "force-dynamic";
 import { google } from "googleapis";
 import { NextResponse } from "next/server";
 
@@ -35,6 +36,30 @@ try {
   console.error("Ошибка при получении Vitals:", error);
   throw error;
 }
+
+const formatDate = (issueDate) => {
+  const date = new Date(issueDate);
+
+  // Настраиваем формат для времени (HH:mm) и даты (DD.MM.YYYY)
+  const formatter = new Intl.DateTimeFormat("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "UTC", // Принудительно оставляем в UTC, чтобы время не съехало из-за вашего часового пояса
+  });
+
+  // Форматируем и меняем местами, так как Intl по умолчанию ставит дату перед временем
+  const formatted = formatter.format(date).replace(",", "");
+  // На выходе получится: "07.06.2026 20:00:00"
+
+  // Чтобы сделать именно "Время Дата", делим строку и пересобираем:
+  const [partsDate, partsTime] = formatted.split(" ");
+
+  return `${partsTime} ${partsDate}`;
+};
+
 const crashesiIssues = issuesResponse
   .filter((issue) => issue.type === "CRASH" && new Date(issue.lastErrorReportTime) >= twentyFourHoursAgo)
   .sort((a, b) => a.lastErrorReportTime.localeCompare(b.lastErrorReportTime))
@@ -43,6 +68,7 @@ const crashesiIssues = issuesResponse
     cause: issue.cause,
     type: issue.type,
     distinctUsers: issue.distinctUsers,
+    date: formatDate(issue.lastErrorReportTime),
   }));
 
 const crashesiIssuesMergedData = Object.values(
@@ -68,13 +94,17 @@ const crashSortedData = [...crashesiIssuesMergedfinalResult].sort((a, b) => {
   return parseInt(b.distinctUsers, 10) - parseInt(a.distinctUsers, 10);
 });
 
-const crashReportString = ` Crashes - всего ${crashesiIssues.length}, полный список здесь: http://34.57.61.249/api/fatal-issues
-    Название                 -                    Уникальных пользователей  
-  ${crashSortedData.slice(0, 5).at(0).cause} - ${crashSortedData.slice(0, 5).at(0).distinctUsers}
-  ${crashSortedData.slice(0, 5).at(1).cause} - ${crashSortedData.slice(0, 5).at(1).distinctUsers}
-  ${crashSortedData.slice(0, 5).at(2).cause} - ${crashSortedData.slice(0, 5).at(2).distinctUsers}
-  ${crashSortedData.slice(0, 5).at(3).cause} - ${crashSortedData.slice(0, 5).at(3).distinctUsers}
-  ${crashSortedData.slice(0, 5).at(4).cause} - ${crashSortedData.slice(0, 5).at(4).distinctUsers}`;
+const crashReportString = {
+  blocks: [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `Crashes - всего ${crashesiIssues.length}, полный список <здесь...|http://34.57.61.249/api/fatal-issues>`,
+      },
+    },
+  ],
+};
 
 export async function GET(request) {
   try {
@@ -92,7 +122,7 @@ export async function GET(request) {
 
 export async function getFatals(request) {
   try {
-    return NextResponse.json(crashReportString);
+    return NextResponse.json({ data: crashSortedData.slice(0, 5) });
   } catch (error) {
     return NextResponse.json(
       {
