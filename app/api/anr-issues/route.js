@@ -89,7 +89,7 @@ const anrIssuesMergedData = Object.values(
 
 const anrIssuesMergedfinalResult = anrIssuesMergedData.map((item) => ({
   ...item,
-  distinctUsers: item.distinctUsers.toString(),
+  distinctUsers: (item.distinctUsers || "").toString(),
 }));
 
 const anrSortedData = [...anrIssuesMergedfinalResult].sort((a, b) => {
