@@ -1,125 +1,63 @@
 export const dynamic = "force-dynamic";
-import { google } from "googleapis";
+
 import { NextResponse } from "next/server";
-
-const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-
-const auth = new google.auth.GoogleAuth({
-  credentials: serviceAccountKey,
-  scopes: ["https://www.googleapis.com/auth/playdeveloperreporting"],
-});
-const authClient = await auth.getClient();
-
-const developerReporting = google.playdeveloperreporting({
-  version: "v1beta1",
-  auth: authClient,
-});
-
-let issuesResponse = [];
-let nextPageToken = null;
-const now = new Date();
-const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-try {
-  do {
-    const response = await developerReporting.vitals.errors.issues.search({
-      parent: "apps/com.openmygame.games.android.jigsaw.solitaire.puzzle",
-      pageSize: 50,
-      pageToken: nextPageToken || undefined,
-    });
-
-    const issues = response.data.errorIssues || [];
-    issuesResponse = issuesResponse.concat(issues);
-    nextPageToken = response.data.nextPageToken;
-  } while (nextPageToken);
-} catch (error) {
-  console.error("Ошибка при получении Vitals:", error);
-  throw error;
-}
-
-const formatDate = (issueDate) => {
-  const date = new Date(issueDate);
-
-  // Настраиваем формат для времени (HH:mm) и даты (DD.MM.YYYY)
-  const formatter = new Intl.DateTimeFormat("ru-RU", {
-    hour: "2-digit",
-    minute: "2-digit",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    timeZone: "UTC", // Принудительно оставляем в UTC, чтобы время не съехало из-за вашего часового пояса
-  });
-
-  // Форматируем и меняем местами, так как Intl по умолчанию ставит дату перед временем
-  const formatted = formatter.format(date).replace(",", "");
-  // На выходе получится: "07.06.2026 20:00:00"
-
-  // Чтобы сделать именно "Время Дата", делим строку и пересобираем:
-  const [partsDate, partsTime] = formatted.split(" ");
-
-  return `${partsTime} ${partsDate}`;
-};
-
-const anrsIssues = issuesResponse
-  .filter(
-    (issue) => issue.type === "APPLICATION_NOT_RESPONDING" && new Date(issue.lastErrorReportTime) >= twentyFourHoursAgo,
-  )
-  .sort((a, b) => a.lastErrorReportTime.localeCompare(b.lastErrorReportTime))
-  .map((issue) => ({
-    issueUri: issue.issueUri,
-    cause: issue.cause,
-    type: issue.type,
-    distinctUsers: issue.distinctUsers,
-    date: formatDate(issue.lastErrorReportTime),
-  }));
-
-const anrIssuesMergedData = Object.values(
-  anrsIssues.reduce((acc, current) => {
-    const key = current.cause;
-
-    if (!acc[key]) {
-      acc[key] = { ...current, distinctUsers: parseInt(current.distinctUsers, 10) || 0 };
-    } else {
-      acc[key].distinctUsers += parseInt(current.distinctUsers, 10) || 0;
-    }
-
-    return acc;
-  }, {}),
-);
-
-const anrIssuesMergedfinalResult = anrIssuesMergedData.map((item) => ({
-  ...item,
-  distinctUsers: (item.distinctUsers || "").toString(),
-}));
-
-const anrSortedData = [...anrIssuesMergedfinalResult].sort((a, b) => {
-  return parseInt(b.distinctUsers, 10) - parseInt(a.distinctUsers, 10);
-});
+import { getAnrsDataOnly } from "../fetch-issues/route";
 
 export async function GET(request) {
-  try {
-    return NextResponse.json(anrSortedData);
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: "Failed to fetch Vitals data",
-        details: error.stack,
-      },
-      { status: 500 },
-    );
-  }
-}
+  let currentStep = "Начало выполнения GET-запроса";
 
-export async function getAnrs(request) {
+  // Создаем уникальный идентификатор запроса (полезно для сопоставления логов)
+  const requestId = Math.random().toString(36).substring(7);
+  const timestamp = new Date().toISOString();
+
   try {
-    return NextResponse.json({ data: anrSortedData.slice(0, 5) });
+    // 1. Попытка вызвать функцию получения данных
+    currentStep = "Вызов функции getCrashesDataOnly (Запрос к источнику данных)";
+    const anrData = await getAnrsDataOnly();
+
+    // 2. Проверка структуры ответа (на случай, если вернулся null/undefined)
+    currentStep = "Проверка валидности полученных данных anrData";
+    if (!anrData) {
+      throw new Error("Функция getCrashesDataOnly вернула пустой ответ (null или undefined)");
+    }
+
+    // 3. Формирование успешного ответа с жестким запретом кэширования на всех уровнях
+    currentStep = "Формирование финального JSON-ответа";
+    return NextResponse.json(anrData, {
+      status: 200,
+      headers: {
+        // Полный запрет кэширования для браузеров, CDN (Cloudflare/Vercel Edge) и прокси-серверов
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+        Pragma: "no-cache",
+        Expires: "0",
+        "Surrogate-Control": "no-store", // Защита от кэширования на уровне Cloudflare/Fastly
+        "X-Request-ID": requestId, // Добавляем ID запроса в заголовки ответа
+      },
+    });
   } catch (error) {
+    // Подробное логирование ошибки в консоль сервера (будет видно в логах развертывания)
+    console.error(`[ERROR][ID: ${requestId}][${timestamp}] Сбой на этапе: "${currentStep}"`);
+    console.error(`[ERROR][ID: ${requestId}] Сообщение ошибки:`, error.message);
+    console.error(`[ERROR][ID: ${requestId}] Стек вызовов:`, error.stack);
+
+    // Возвращаем структурированный ответ клиенту с указанием места падения
     return NextResponse.json(
       {
         error: "Failed to fetch Vitals data",
+        failedAtStep: currentStep, // Четкое указание, какая подфункция/строка упала
+        errorMessage: error.message,
+        requestId: requestId, // По этому ID вы сможете найти полный стек в серверных логах
+        timestamp: timestamp,
         details: error.stack,
       },
-      { status: 500 },
+      {
+        status: 500,
+        headers: {
+          // Ошибки тоже важно не кэшировать, иначе API будет постоянно отдавать 500-ю ошибку
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          Pragma: "no-cache",
+        },
+      },
     );
   }
 }
