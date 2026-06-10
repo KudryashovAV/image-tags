@@ -103,7 +103,7 @@ export async function GET(request) {
     return NextResponse.json(
       {
         error: "Failed to fetch Vitals data",
-        details: error.message,
+        details: error.stack,
       },
       { status: 500 },
     );
@@ -117,7 +117,7 @@ export async function getAnrs(request) {
     return NextResponse.json(
       {
         error: "Failed to fetch Vitals data",
-        details: error.message,
+        details: error.stack,
       },
       { status: 500 },
     );
