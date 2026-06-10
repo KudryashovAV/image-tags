@@ -87,7 +87,7 @@ export async function GET(request) {
                 elements: [
                   {
                     type: "text",
-                    text: String(issue.cause), // Приводим к строке на всякий случай
+                    text: (issue.cause || "").toString(), // Приводим к строке на всякий случай
                   },
                 ],
               },
@@ -101,7 +101,7 @@ export async function GET(request) {
                 elements: [
                   {
                     type: "text",
-                    text: String(issue.date),
+                    text: (issue.date || "").toString(),
                   },
                 ],
               },
@@ -115,7 +115,7 @@ export async function GET(request) {
                 elements: [
                   {
                     type: "text",
-                    text: String(issue.distinctUsers),
+                    text: (issue.distinctUsers || "").toString(),
                   },
                 ],
               },
@@ -319,8 +319,6 @@ export async function GET(request) {
         wrapRateTable(),
       ],
     };
-
-    console.log(wrapRateTable());
 
     const slackResponse = await fetch(process.env.TECH_SLACK_WEBHOOK_URL, {
       method: "POST",
