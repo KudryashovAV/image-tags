@@ -323,22 +323,22 @@ export async function GET(request) {
     }
 
     // // 10. Отправка в Slack
-    // let slackResponse, errorText;
-    // try {
-    //   slackResponse = await fetch(process.env.TECH_SLACK_WEBHOOK_URL, {
-    //     method: "POST",
-    //     headers: { "Content-Type": "application/json" },
-    //     body: JSON.stringify(payload),
-    //   });
-    //   errorText = await slackResponse.text();
-    //   console.log("slackResponse log:", errorText);
-    // } catch (err) {
-    //   throw new Error(`[Slack Транспорт] Сетевая ошибка при отправке запроса на Вебхук: ${err.message}`);
-    // }
+    let slackResponse, errorText;
+    try {
+      slackResponse = await fetch(process.env.TECH_SLACK_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      errorText = await slackResponse.text();
+      console.log("slackResponse log:", errorText);
+    } catch (err) {
+      throw new Error(`[Slack Транспорт] Сетевая ошибка при отправке запроса на Вебхук: ${err.message}`);
+    }
 
-    // if (!slackResponse.ok) {
-    //   throw new Error(`[Slack API Error] Вебхук вернул статус ${slackResponse.status}. Ответ Slack: ${errorText}`);
-    // }
+    if (!slackResponse.ok) {
+      throw new Error(`[Slack API Error] Вебхук вернул статус ${slackResponse.status}. Ответ Slack: ${errorText}`);
+    }
 
     // В случае успеха возвращаем данные
     return NextResponse.json(
