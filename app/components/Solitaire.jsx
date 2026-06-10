@@ -31,7 +31,7 @@ const Solitaire = ({ data }) => {
         }}
       >
         {data.map((item, index) => {
-          const itemId = item[1].id;
+          const itemId = item[2].id;
           const isOpen = openItemId === itemId;
 
           return (

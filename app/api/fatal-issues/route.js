@@ -87,24 +87,12 @@ const crashesiIssuesMergedData = Object.values(
 
 const crashesiIssuesMergedfinalResult = crashesiIssuesMergedData.map((item) => ({
   ...item,
-  distinctUsers: item.distinctUsers.toString(),
+  distinctUsers: (item.distinctUsers || "").toString(),
 }));
 
 const crashSortedData = [...crashesiIssuesMergedfinalResult].sort((a, b) => {
   return parseInt(b.distinctUsers, 10) - parseInt(a.distinctUsers, 10);
 });
-
-const crashReportString = {
-  blocks: [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `Crashes - всего ${crashesiIssues.length}, полный список <здесь...|http://34.57.61.249/api/fatal-issues>`,
-      },
-    },
-  ],
-};
 
 export async function GET(request) {
   try {
