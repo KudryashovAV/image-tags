@@ -342,8 +342,8 @@ export async function GET(request) {
   } catch (error) {
     return NextResponse.json(
       {
-        error: "Failed to fetch Vitals data",
-        details: error.message,
+        error: "Failed concat data from anr and fatal endpoints",
+        details: error.stack,
       },
       { status: 500 },
     );
