@@ -352,7 +352,7 @@ export async function GET(request) {
     let slackResponse, errorText;
     currentStep = "Отправка POST запроса в Slack Webhook";
     try {
-      slackResponse = await fetch(process.env.TECH_SLACK_WEBHOOK_URL, {
+      slackResponse = await fetch(process.env.TECH_SLACK_WEBHOOK_UR, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
