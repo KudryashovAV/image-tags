@@ -30,8 +30,8 @@ script:
     - npm ci
     - rm -rf /srv/image-tags/.next
     - echo "Building..."
-    - unset TECH_WEBHOOK && npm run build   
+    - 'unset TECH_WEBHOOK && npm run build'   
     - pm2 delete image-tags-app || true
-    - unset TECH_WEBHOOK && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start
+    - 'unset TECH_WEBHOOK && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start'
     - pm2 save
   
