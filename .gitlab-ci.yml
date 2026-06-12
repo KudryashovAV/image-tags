@@ -23,7 +23,7 @@ deploy:
     - echo "" >> .env 
     - cat $SLACK_HOOK >> .env
     - echo "" >> .env 
-    - cat $TECH_WEBHOOK >> .env
+    - echo "TECH_WEBHOOK=$(cat $TECH_WEBHOOK)" >> .env
     - echo " .env created with Slack Hook"        
     - echo " Installing dependencies (npm ci)..."
     - npm ci
