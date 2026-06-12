@@ -28,11 +28,7 @@ deploy:
     - echo " Installing dependencies (npm ci)..."
     - npm ci
     - echo "🏗️  Building production bundle (next build)..."
-    - echo "=== .env content ===" 
-    - cat .env
-    - echo "=== end ==="
-    - npm run build
-    - echo "🔁 Restarting app via PM2..."
     - pm2 delete image-tags-app || true
-    - pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start
+    - pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -e TECH_WEBHOOK=$(cat $TECH_WEBHOOK) -- start
     - pm2 save
+  
