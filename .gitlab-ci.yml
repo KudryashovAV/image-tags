@@ -28,6 +28,9 @@ deploy:
     - echo " Installing dependencies (npm ci)..."
     - npm ci
     - echo "🏗️  Building production bundle (next build)..."
+    - echo "=== .env content ===" 
+    - cat .env
+    - echo "=== end ==="
     - npm run build
     - echo "🔁 Restarting app via PM2..."
     - pm2 delete image-tags-app || true
