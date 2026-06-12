@@ -14,6 +14,7 @@ deploy:
     - ENC_USER="${deploy_on_image_token:-}"
     - GIT_PASSWORD="${deploy_on_image_var:-}"
   script:
+script:
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" main
     - git reset --hard FETCH_HEAD
     - rm -f .env                        
@@ -24,11 +25,13 @@ deploy:
     - cat $SLACK_HOOK >> .env
     - echo "" >> .env 
     - echo "TECH_WEBHOOK=$(cat $TECH_WEBHOOK)" >> .env
-    - echo " .env created with Slack Hook"        
+    - echo " .env created"
     - echo " Installing dependencies (npm ci)..."
     - npm ci
-    - echo "🏗️  Building production bundle (next build)..."
+    - rm -rf /srv/image-tags/.next
+    - echo "Building..."
+    - unset TECH_WEBHOOK && npm run build   
     - pm2 delete image-tags-app || true
-    - pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start
+    - unset TECH_WEBHOOK && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start
     - pm2 save
   
