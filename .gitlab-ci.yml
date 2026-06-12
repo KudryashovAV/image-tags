@@ -29,6 +29,6 @@ deploy:
     - npm ci
     - echo "🏗️  Building production bundle (next build)..."
     - pm2 delete image-tags-app || true
-    - pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -e TECH_WEBHOOK=$(cat $TECH_WEBHOOK) -- start
+    - pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start
     - pm2 save
   
