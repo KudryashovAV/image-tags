@@ -127,7 +127,7 @@ const fetchEvents = async () => {
   } else if (eventsWithoutConfig.length > 0) {
     return `Так же проверены события. События с ID ${nearEventsIds} имеют недостающий конфиг`;
   } else if (brokenEvents.length === 0 && eventsWithoutConfig.length === 0 && nearEventsIds.length < 4) {
-    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и две обложки(regular и low качества). Только ближайшие ${nearEventsIds.length} недель имеют события. Обратите внимание, что нужно ещё хотя бы ${4 - nearEventsIds.length} событий в запасе!`;
+    return `:alert-1: Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и две обложки(regular и low качества). Только ближайшие ${nearEventsIds.length} недель имеют события. Обратите внимание, что нужно ещё хотя бы ${4 - nearEventsIds.length} событий в запасе!`;
   } else {
     return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и две обложки(regular и low качества).`;
   }
