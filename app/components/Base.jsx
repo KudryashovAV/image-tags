@@ -258,7 +258,7 @@ const fetchConfig2 = () => {
       Array.from(
         { length: maxNumber },
         (_, i) =>
-          `https://storage.googleapis.com/malpa-static/jigsaw_solitaire/daily_lvl/textures_levels/v1/${key}/${i + 1}.jpg`,
+          `https://malpacdn.com/jigsaw_solitaire/daily_lvl/textures_levels/v1/${key}/${i + 1}.jpg`,
       ),
     ]),
   );
@@ -335,14 +335,14 @@ const fetchConfig = async () => {
 const solitaireData = await fetchConfig();
 const solitaireDailyData = await fetchConfig2();
 const tagsData = await showTagsWithIdFor(
-  "https://storage.googleapis.com/malpa-static/jigsawgram/daily_config/levels_chunk_",
+  "https://malpacdn.com/jigsawgram/daily_config/levels_chunk_",
   "daily",
-  "https://storage.googleapis.com/malpa-static/jigsawgram/daily/",
+  "https://malpacdn.com/jigsawgram/daily/",
 );
 const tagsData2 = await showTagsWithIdFor2(
-  "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles_config/levels_chunk_",
+  "https://malpacdn.com/jigsawgram/puzzles_config/levels_chunk_",
   "puzzle",
-  "https://storage.googleapis.com/malpa-static/jigsawgram/puzzles/",
+  "https://malpacdn.com/jigsawgram/puzzles/",
 );
 
 const finalData = mergeObjectsWithArrays(tagsData, tagsData2);
