@@ -58,7 +58,7 @@ export async function POST(request) {
     if (!spreadsheetId) return NextResponse.json({ error: "Missing spreadsheetId" }, { status: 400 });
 
     const { drive, sheets } = await getGoogleAuth();
-    const rootFolderId = process.env.GOOGLE_GENERATION_ROOT_FOLDER_ID;
+    const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA"; //process.env.GOOGLE_GENERATION_ROOT_FOLDER_ID;
     if (!rootFolderId || rootFolderId === "undefined") {
       throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env или не считалась");
     }
@@ -378,7 +378,7 @@ async function backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFo
 
 // Запрос генерации изображений через нано-модель Gemini 3.1 Flash Image Preview (Исправлено)
 async function generateImagen3(clientPrompt) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = "process.env.GEMINI_API_KEY";
   const modelName = "gemini-3.1-flash-image-preview";
 
   if (!apiKey) {
