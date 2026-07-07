@@ -16,20 +16,20 @@ deploy:
   script:
     - git fetch --prune "https://${ENC_USER}:${GIT_PASSWORD}@gitlab.com/a.kudryashov/image-tags.git" main
     - git reset --hard FETCH_HEAD
-    - rm -f .env                        
+    - rm -f .env
     - cp $ENV_FILE .env
-    - echo "" >> .env                 
-    - cat $ENV_SYNH >> .env   
-    - echo "" >> .env 
+    - echo "" >> .env
+    - cat $ENV_SYNH >> .env
+    - echo "" >> .env
     - cat $SLACK_HOOK >> .env
-    - echo "" >> .env 
-    - echo "TECH_WEBHOOK=$(cat $TECH_WEBHOOK)" >> .env
+    - echo "" >> .env
+    - echo "TECH_WEBHOOK=$(cat $TECH_WEBHOOK | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "OPENAI_API_KEY=$(cat $OPENAI_API_KEY | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "GOOGLE_CLIENT_ID=$(cat $GOOGLE_CLIENT_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "GOOGLE_CLIENT_SECRET=$(cat $GOOGLE_CLIENT_SECRET | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "GOOGLE_ACCESS_TOKEN=$(cat $GOOGLE_ACCESS_TOKEN | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "GOOGLE_REFRESH_TOKEN=$(cat $GOOGLE_REFRESH_TOKEN | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
-    - eсho "GOOGLE_MASTER_SHEET_ID=$(cat $GOOGLE_MASTER_SHEET_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
+    - echo "GOOGLE_MASTER_SHEET_ID=$(cat $GOOGLE_MASTER_SHEET_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "SERPER_API_KEY=$(cat $SERPER_API_KEY | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo " .env created"
     - echo " Installing dependencies (npm ci)..."
@@ -40,4 +40,4 @@ deploy:
     - pm2 delete image-tags-app || true
     - 'unset TECH_WEBHOOK OPENAI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_ACCESS_TOKEN GOOGLE_REFRESH_TOKEN GOOGLE_MASTER_SHEET_ID SERPER_API_KEY && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start'
     - pm2 save
-  
+    
