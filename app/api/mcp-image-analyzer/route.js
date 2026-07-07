@@ -43,6 +43,20 @@ function getFormattedDate() {
   return `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
 }
 
+export async function GET(request) {
+  try {
+    return NextResponse.json({ ok: "ok" }, { status: 200 });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: "Something went wrong",
+        details: error.message,
+      },
+      { status: 500 },
+    );
+  }
+}
+
 export async function POST(request) {
   try {
     const body = await request.json();
