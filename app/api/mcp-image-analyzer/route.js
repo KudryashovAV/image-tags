@@ -6,25 +6,40 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ID файла конфигурации промпта на Google Диске
 const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
 
-// БУЛЛЕТПРУФ АВТОРИЗАЦИЯ
+// Нативная функция отправки сообщений в Slack
+async function sendSlackMessage(channel, text, threadTs = null) {
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (!token) {
+    console.error("[Slack] Ошибка: Переменная SLACK_BOT_TOKEN не задана в .env");
+    return null;
+  }
+  try {
+    const res = await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ channel, text, thread_ts: threadTs }),
+    });
+    const data = await res.json();
+    return data.ok ? data.ts : null;
+  } catch (e) {
+    console.error("[Slack API Error]:", e.message);
+    return null;
+  }
+}
+
 async function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
   oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-
   try {
     const tokenResponse = await oauth2Client.getAccessToken();
-    if (!tokenResponse || !tokenResponse.token) {
-      throw new Error("Google не вернул access_token.");
-    }
-    oauth2Client.setCredentials({
-      access_token: tokenResponse.token,
-      refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
-    });
+    if (!tokenResponse || !tokenResponse.token) throw new Error("Google не вернул access_token.");
+    oauth2Client.setCredentials({ access_token: tokenResponse.token, refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
   } catch (e) {
-    console.error("Критическая ошибка OAuth токена:", e.message);
     throw new Error(`Google OAuth Refresh Failed: ${e.message}`);
   }
   return {
@@ -40,57 +55,89 @@ function getFormattedDate() {
 }
 
 export async function GET() {
-  return NextResponse.json({
-    status: "active",
-    message: "Image Analyzer Server is running in background-mode.",
-  });
+  return NextResponse.json({ status: "active", message: "Server is running." });
 }
 
-// ГИБРИДНЫЙ POST-МЕТОД: Мгновенно возвращает ответ, уводя тяжелый анализ в фон
+// МГНОВЕННЫЙ POST-МЕТОД: Парсит аргументы за микросекунды и сразу отвечает Slack (200 OK)
 export async function POST(request) {
   try {
-    const body = await request.json();
-    let isMcp = false;
-    let id = 1;
-    let toolArgs = {};
+    const contentType = request.headers.get("content-type") || "";
 
-    if (body && body.method) {
-      isMcp = true;
-      id = body.id || 1;
-      if (body.method === "tools/list") {
-        return NextResponse.json({
-          jsonrpc: "2.0",
-          id,
-          result: {
-            tools: [
-              {
-                name: "analyze_google_drive_folder",
-                description:
-                  "Фоновый рекурсивный анализ папок Google Drive. Автоматически доанализирует незавершенные таблицы результатов.",
-                inputSchema: {
-                  type: "object",
-                  properties: {
-                    folderId: { type: "string" },
-                    rules: { type: "string" },
-                    ratio: { type: "string" },
-                    mandatorySuffix: { type: "string" },
-                  },
-                  required: ["folderId"],
-                },
-              },
-            ],
-          },
-        });
+    let folderId = null;
+    let rules = null;
+    let ratio = null;
+    let mandatorySuffix = null;
+
+    let isMcp = false;
+    let isSlack = false;
+    let id = 1;
+    let slackChannelId = null;
+
+    // 1. ПАРСИНГ ЗАПРОСА (Сверхбыстрый, без сетевых вызовов)
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      isSlack = true;
+      const formData = await request.formData();
+      const slackText = (formData.get("text") || "").trim();
+      slackChannelId = formData.get("channel_id");
+
+      if (!slackText) {
+        return new Response("❌ Ошибка: Вы не указали ID папки. Используйте: /analyze [ID_папки]", { status: 200 });
       }
-      if (body.method === "tools/call" && body.params?.name === "analyze_google_drive_folder") {
-        toolArgs = body.params.arguments || {};
+
+      const firstSpaceIndex = slackText.indexOf(" ");
+      if (firstSpaceIndex === -1) {
+        folderId = slackText;
+      } else {
+        folderId = slackText.substring(0, firstSpaceIndex).trim();
+        const remainingArgs = slackText.substring(firstSpaceIndex).trim();
+
+        const regex = /(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
+        let match;
+        while ((match = regex.exec(remainingArgs)) !== null) {
+          const key = match[1].toLowerCase();
+          const value = match[2] || match[3] || match[4];
+          if (key === "ratio") ratio = value;
+          if (key === "rules" || key === "правила") rules = value;
+          if (key === "mandatorysuffix" || key === "суффикс") mandatorySuffix = value;
+        }
       }
     } else {
-      toolArgs = body || {};
+      const body = await request.json();
+      if (body && body.method) {
+        isMcp = true;
+        id = body.id || 1;
+        if (body.method === "tools/list") {
+          return NextResponse.json({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              tools: [
+                {
+                  name: "analyze_google_drive_folder",
+                  description: "Фоновый анализ папок.",
+                  inputSchema: { type: "object", properties: { folderId: { type: "string" } }, required: ["folderId"] },
+                },
+              ],
+            },
+          });
+        }
+        if (body.method === "tools/call" && body.params?.name === "analyze_google_drive_folder") {
+          const args = body.params.arguments || {};
+          folderId = args.folderId;
+          rules = args.rules;
+          ratio = args.ratio;
+          mandatorySuffix = args.mandatorySuffix;
+        }
+      } else {
+        folderId = body.folderId;
+        rules = body.rules;
+        ratio = body.ratio;
+        mandatorySuffix = body.mandatorySuffix;
+      }
     }
 
-    const { folderId, rules, ratio, mandatorySuffix } = toolArgs;
     if (!folderId) {
+      if (isSlack) return new Response("❌ Ошибка: отсутствует folderId", { status: 200 });
       return NextResponse.json(
         isMcp
           ? { jsonrpc: "2.0", id, error: { code: -32602, message: "Missing folderId" } }
@@ -99,51 +146,79 @@ export async function POST(request) {
       );
     }
 
-    const { drive: baseDrive } = await getGoogleAuth();
-    let promptConfig = {};
-    try {
-      const configResponse = await baseDrive.files.get({ fileId: CONFIG_FILE_ID, alt: "media" });
-      promptConfig = typeof configResponse.data === "string" ? JSON.parse(configResponse.data) : configResponse.data;
-    } catch (err) {
-      console.error("Предупреждение: не удалось прочитать дефолтный конфиг с диска.");
+    // --- КЛЮЧЕВОЙ МОМЕНТ: ПЕРЕДАЕМ СЫРЫЕ НАСТРОЙКИ В ФОН БЕЗ ОЖИДАНИЯ СЕТИ ---
+    const rawOverrides = { rules, ratio, mandatorySuffix };
+    backgroundOrchestrator(folderId, rawOverrides, { slackChannelId });
+
+    // Мгновенный ответ: Slack получит статус 200 за 15-30 миллисекунд и будет счастлив
+    if (isSlack) {
+      // Возвращаем текст, который Slack сразу покажет пользователю, вызвавшему команду
+      return new Response(
+        "⏳ Запрос принят! Разворачиваю фоновый процесс анализа, ожидайте стартовое сообщение в канале...",
+        { status: 200 },
+      );
     }
 
-    const finalConfig = {
-      rules: rules || promptConfig["rules"] || promptConfig["правила"],
-      ratio: ratio || promptConfig["ratio"],
-      mandatorySuffix: mandatorySuffix || promptConfig["mandatory"] || promptConfig["обязательная часть промта"],
-    };
-
-    backgroundOrchestrator(folderId, finalConfig);
-
-    const msg = `Рекурсивный анализ папки ${folderId} успешно запущен в фоновом режиме на сервере бэкенда. Система автоматически проверит существующие и незавершенные таблицы результатов.`;
-
-    if (isMcp) {
-      return NextResponse.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: msg }] } });
-    } else {
-      return NextResponse.json({ success: true, summary: msg });
-    }
+    const msg = `Рекурсивный анализ папки ${folderId} запущен в фоне.`;
+    return isMcp
+      ? NextResponse.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: msg }] } })
+      : NextResponse.json({ success: true, summary: msg });
   } catch (error) {
     console.error("Fatal Endpoint Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
 
-// АСИНХРОННЫЙ ФОНОВЫЙ ДВИЖОК
-async function backgroundOrchestrator(rootFolderId, finalConfig) {
-  console.log(`[Background Analyzer] Старт фонового процесса для папки: ${rootFolderId}`);
+// УМНЫЙ АСИНХРОННЫЙ ФОНОВЫЙ ДВИЖОК
+async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = {}) {
+  const { slackChannelId } = slackParams;
+  let slackThreadTs = null;
 
-  const accountSheetId = process.env.GOOGLE_MASTER_SHEET_ID;
-  if (!accountSheetId) {
-    console.error("[Fatal Background Error] GOOGLE_MASTER_SHEET_ID отсутствует в .env");
-    return;
-  }
+  console.log(`[Background Analyzer] Запуск фонового процесса для папки: ${rootFolderId}`);
 
-  let totalProcessedImages = 0;
-  let foldersAnalyzedCount = 0;
-
-  async function processFolder(folderId) {
+  try {
+    // 1. АВТОРИЗАЦИЯ И ЧТЕНИЕ КОНФИГА ИЗ ФОНА
+    const { drive: baseDrive } = await getGoogleAuth();
+    let promptConfig = {};
     try {
+      const configResponse = await baseDrive.files.get({ fileId: CONFIG_FILE_ID, alt: "media" });
+      promptConfig = typeof configResponse.data === "string" ? JSON.parse(configResponse.data) : configResponse.data;
+    } catch (err) {
+      console.error("[Background] Не удалось прочитать дефолтный конфиг с диска, использую фолбеки.");
+    }
+
+    // Формируем финальные настройки ИИ
+    const finalConfig = {
+      rules: rawOverrides.rules || promptConfig["rules"] || promptConfig["правила"],
+      ratio: rawOverrides.ratio || promptConfig["ratio"],
+      mandatorySuffix:
+        rawOverrides.mandatorySuffix || promptConfig["mandatory"] || promptConfig["обязательная часть промта"],
+    };
+
+    // 2. СИНХРОНИЗАЦИЯ СО СЛАКОМ: Публикуем официальный старт ТРЕДА
+    if (slackChannelId) {
+      const initialMessage = `🚀 *Запуск анализа папки:* \`${rootFolderId}\`\n⏳ Я начал рекурсивный обход директорий. Ссылки на готовые таблицы буду присылать ответам в этот тред по мере завершения!`;
+      slackThreadTs = await sendSlackMessage(slackChannelId, initialMessage);
+    }
+
+    const accountSheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+    if (!accountSheetId) {
+      console.error("[Background] Ошибка: GOOGLE_MASTER_SHEET_ID не задан в .env");
+      if (slackChannelId && slackThreadTs)
+        await sendSlackMessage(
+          slackChannelId,
+          "❌ Критическая ошибка: Не задан GOOGLE_MASTER_SHEET_ID на сервере.",
+          slackThreadTs,
+        );
+      return;
+    }
+
+    let totalProcessedImages = 0;
+    let foldersAnalyzedCount = 0;
+    const processedFoldersReport = [];
+
+    // Внутренняя рекурсивная функция
+    async function processFolder(folderId) {
       const { drive, sheets } = await getGoogleAuth();
 
       const folderMeta = await drive.files.get({ fileId: folderId, fields: "name, webViewLink" });
@@ -165,7 +240,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
       const subfolders = subfoldersResponse.data.files || [];
 
       if (images.length > 0) {
-        // Запрашиваем id, webViewLink и NAME, чтобы отслеживать пометку "[В процессе]"
         const existingSheetsResponse = await drive.files.list({
           q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and name contains 'Результаты анализа' and trashed = false`,
           fields: "files(id, name, webViewLink)",
@@ -190,16 +264,9 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
           const totalRows = sheetData.data.values ? sheetData.data.values.length : 0;
           const dataRowsCount = totalRows > 0 ? totalRows - 1 : 0;
 
-          // ПРОВЕРКА ДИФФЕРЕНЦИАЛА: Если строк в таблице столько же или больше, чем картинок на Диске
           if (dataRowsCount >= images.length) {
             isAlreadyFullyAnalyzed = true;
-            console.log(`[Background Analyzer] Пропуск папки (анализ завершен): ${folderName}`);
-
-            // Если таблица полностью заполнена, но зависла в статусе "[В процессе]", финализируем её
             if (existingSheetName.includes("[В процессе]")) {
-              console.log(
-                `[Background Analyzer] Таблица для ${folderName} заполнена, но была "[В процессе]". Переводим в окончательный вариант...`,
-              );
               const endTime = getFormattedDate();
               await drive.files.update({
                 fileId: resultSheetId,
@@ -212,11 +279,8 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
                 requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
               });
             }
+            processedFoldersReport.push(`• *${folderName}* (Пропущена, уже была готова): ${resultSheetUrl}`);
           } else {
-            // Если строк меньше, мы собираем ссылки на уже обработанные файлы, чтобы сделать ДОАНАЛИЗ
-            console.log(
-              `[Background Analyzer] Найдена незавершенная сессия для папки ${folderName} (${dataRowsCount}/${images.length} строк). Доанализируем...`,
-            );
             if (sheetData.data.values) {
               sheetData.data.values.forEach((row) => {
                 if (row[0]) analyzedImageIds.add(row[0]);
@@ -234,7 +298,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
 
         foldersAnalyzedCount++;
 
-        // Если таблицы не было вообще — создаем её со статусом "[В процессе]"
         if (!resultSheetId) {
           const newSheet = await sheets.spreadsheets.create({
             requestBody: {
@@ -263,7 +326,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
           });
         }
 
-        // Отбираем только те картинки, ссылок на которые ещё НЕТ в первой колонке таблицы результатов
         const imagesToProcess = images.filter((img) => !analyzedImageIds.has(img.webViewLink));
         const batchSize = 10;
 
@@ -284,7 +346,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
                   base64: Buffer.from(response.data).toString("base64"),
                 };
               } catch (e) {
-                console.error(`Ошибка загрузки файла ${img.id}:`, e.message);
                 return null;
               }
             }),
@@ -297,14 +358,10 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
           try {
             gptResults = await analyzeImagesWithGPT(validImages, finalConfig);
           } catch (openaiErr) {
-            console.error(
-              `[OpenAI Error] Сбой пачки на папке ${folderName}: ${openaiErr.message}. Повтор через 5 секунд...`,
-            );
             await new Promise((r) => setTimeout(r, 5000));
             try {
               gptResults = await analyzeImagesWithGPT(validImages, finalConfig);
             } catch (e) {
-              console.error("Повторный сбой OpenAI. Пропускаем пачку.");
               continue;
             }
           }
@@ -327,9 +384,8 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
             requestBody: { values: rowsToAppend },
           });
 
-          // --- ОБНОВЛЕННАЯ СЕТКА: АВТОШИРИНА + ПЕРЕНОС СЛОВ + ВЫРАВНИВАНИЕ ---
           try {
-            const updatedRange = appendRes.data.updates.updatedRange; // Например, "Результаты!A2:E11"
+            const updatedRange = appendRes.data.updates.updatedRange;
             const rangeParts = updatedRange.split("!")[1].split(":");
             const startRow = parseInt(rangeParts[0].replace(/\D/g, ""));
             const endRow = parseInt(rangeParts[1].replace(/\D/g, ""));
@@ -339,7 +395,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
               requestBody: {
                 requests: [
                   {
-                    // 1. Фиксированная высота строк под картинку (250px)
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "ROWS", startIndex: startRow - 1, endIndex: endRow },
                       properties: { pixelSize: 250 },
@@ -347,7 +402,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
                     },
                   },
                   {
-                    // 2. Фиксированная ширина колонки B под превью картинки (250px)
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
                       properties: { pixelSize: 250 },
@@ -355,7 +409,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
                     },
                   },
                   {
-                    // 3. Перенос слов (WRAP) + выравнивание по центру для ВСЕХ текстовых ячеек (A-E)
                     repeatCell: {
                       range: {
                         sheetId: 0,
@@ -364,51 +417,29 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
                         startColumnIndex: 0,
                         endColumnIndex: 5,
                       },
-                      cell: {
-                        userEnteredFormat: {
-                          wrapStrategy: "WRAP", // Текст гарантированно не вылезет наружу
-                          verticalAlignment: "MIDDLE", // Красивое центрирование по вертикали
-                        },
-                      },
+                      cell: { userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "MIDDLE" } },
                       fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
                     },
                   },
                   {
-                    // 4. АВТОПОДБОР ШИРИНЫ для колонки A (Ссылка на донора)
                     autoResizeDimensions: {
-                      dimensions: {
-                        sheetId: 0,
-                        dimension: "COLUMNS",
-                        startIndex: 0, // Индекс 0 — это колонка A
-                        endIndex: 1,
-                      },
+                      dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
                     },
                   },
                   {
-                    // 5. АВТОПОДБОР ШИРИНЫ для колонок C, D, E (Описание, Промт, Теги) под длину текста
                     autoResizeDimensions: {
-                      dimensions: {
-                        sheetId: 0,
-                        dimension: "COLUMNS",
-                        startIndex: 2, // Индексы с 2 по 4 (включительно) — это C, D, E
-                        endIndex: 5, // endIndex не включается, поэтому указываем 5
-                      },
+                      dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 5 },
                     },
                   },
                 ],
               },
             });
-            console.log(
-              `[Google Sheets] Сетка, автоширина и перенос строк успешно применены для пачки строк ${startRow}-${endRow}`,
-            );
           } catch (resizeErr) {
-            console.error("Ошибка автоматического изменения размеров и форматирования ячеек:", resizeErr.message);
+            console.error(resizeErr);
           }
           totalProcessedImages += validImages.length;
         }
 
-        // Финализация: После того как все оставшиеся изображения доанализированы,
-        // мы переводим таблицу в окончательный вариант (переименовываем, убирая пометку "[В процессе]")
         const endTime = getFormattedDate();
         await drive.files.update({ fileId: resultSheetId, requestBody: { name: `Результаты анализа ${endTime}` } });
         await sheets.spreadsheets.values.append({
@@ -417,20 +448,46 @@ async function backgroundOrchestrator(rootFolderId, finalConfig) {
           valueInputOption: "USER_ENTERED",
           requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
         });
+
+        // ОТПРАВКА ССЫЛКИ В ТРЕД СЛАКА СРАЗУ ПО ГОТОВНОСТИ ПАНКИ
+        if (slackChannelId && slackThreadTs) {
+          const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
+          await sendSlackMessage(slackChannelId, folderReadyMsg, slackThreadTs);
+        }
+
+        processedFoldersReport.push(`• *${folderName}* (Анализ успешно завершен): ${resultSheetUrl}`);
       }
 
       for (const subfolder of subfolders) {
         await processFolder(subfolder.id);
       }
-    } catch (folderErr) {
-      console.error(`Ошибка обработки уровня папки ${folderId}:`, folderErr.message);
+    }
+
+    // Запускаем рекурсию
+    await processFolder(rootFolderId);
+
+    // ФИНАЛЬНЫЙ СУММАРНЫЙ ОТЧЕТ В ТРЕД СЛАКА
+    if (slackChannelId && slackThreadTs) {
+      const finalSlackSummary =
+        `🏁 *Весь рекурсивный анализ полностью завершен!*\n\n` +
+        `📈 *Итоги сессии:*\n` +
+        `• Всего новых папок: *${foldersAnalyzedCount}*\n` +
+        `• Всего размечено изображений: *${totalProcessedImages}*\n\n` +
+        `📂 *Реестр таблиц по папкам:*\n` +
+        (processedFoldersReport.length > 0 ? processedFoldersReport.join("\n") : "• Новых изображений не найдено.");
+
+      await sendSlackMessage(slackChannelId, finalSlackSummary, slackThreadTs);
+    }
+  } catch (fatalBgError) {
+    console.error("[Fatal Background Worker Error]:", fatalBgError.message);
+    if (slackChannelId && slackThreadTs) {
+      await sendSlackMessage(
+        slackChannelId,
+        `❌ Критическая ошибка фонового процесса: \`${fatalBgError.message}\``,
+        slackThreadTs,
+      );
     }
   }
-
-  await processFolder(rootFolderId);
-  console.log(
-    `[Background Analyzer] Успешно завершено! Новых папок: ${foldersAnalyzedCount}, новых картинок: ${totalProcessedImages}`,
-  );
 }
 
 async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
