@@ -44,3 +44,4 @@ deploy:
     - pm2 delete image-tags-app || true
     - 'unset TECH_WEBHOOK OPENAI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_ACCESS_TOKEN GOOGLE_REFRESH_TOKEN GOOGLE_MASTER_SHEET_ID SERPER_API_KEY GOOGLE_GENERATION_ROOT_FOLDER_ID CONFIG_FILE_ID SLACK_BOT_TOKEN && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start'
     - pm2 save
+    
