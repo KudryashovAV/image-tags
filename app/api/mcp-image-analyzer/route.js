@@ -8,7 +8,7 @@ const openai = new OpenAI({
 
 const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
 
-// Нативная функция отправки сообщений в Slack (ИСПРАВЛЕНА)
+// Нативная функция отправки сообщений в Slack через Токен
 async function sendSlackMessage(channel, text, threadTs = null) {
   const token = process.env.SLACK_BOT_TOKEN;
   if (!token) {
@@ -16,11 +16,9 @@ async function sendSlackMessage(channel, text, threadTs = null) {
     return null;
   }
   try {
-    // Собираем тело запроса динамически, чтобы избежать передачи thread_ts: null
     const payload = { channel, text };
-
     if (threadTs) {
-      payload.thread_ts = threadTs; // Добавляем только если это реальный ответ в тред
+      payload.thread_ts = threadTs; // Добавляем только для ответов в тред
     }
 
     const res = await fetch("https://slack.com/api/chat.postMessage", {
@@ -33,15 +31,30 @@ async function sendSlackMessage(channel, text, threadTs = null) {
     });
 
     const data = await res.json();
-
     if (!data.ok) {
-      console.error("[Slack API Error Response]:", data.error);
+      console.error("[Slack API Error chat.postMessage]:", data.error);
     }
-
     return data.ok ? data.ts : null;
   } catch (e) {
     console.error("[Slack API Error]:", e.message);
     return null;
+  }
+}
+
+// Резервный инструмент отправки сообщений через response_url (работает БЕЗ токенов)
+async function sendSlackResponseUrl(url, text, isPublic = true) {
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        response_type: isPublic ? "in_channel" : "ephemeral",
+        text: text,
+      }),
+    });
+  } catch (e) {
+    console.error("[Slack API Error response_url]:", e.message);
   }
 }
 
@@ -83,13 +96,16 @@ export async function POST(request) {
     let isMcp = false;
     let isSlack = false;
     let id = 1;
+
     let slackChannelId = null;
+    let responseUrl = null;
 
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
-      slackChannelId = formData.get("channel_id");
+      slackChannelId = formData.get("channel_id")?.toString();
+      responseUrl = formData.get("response_url")?.toString() || null; // Забираем спасательную ссылку
 
       if (!slackText) {
         return new Response("❌ Ошибка: Вы не указали ID папки. Используйте: /analyze [ID_папки]", { status: 200 });
@@ -158,10 +174,11 @@ export async function POST(request) {
     }
 
     const rawOverrides = { rules, ratio, mandatorySuffix };
-    backgroundOrchestrator(folderId, rawOverrides, { slackChannelId });
+
+    // Передаем responseUrl в фоновый движок
+    backgroundOrchestrator(folderId, rawOverrides, { slackChannelId, responseUrl });
 
     if (isSlack) {
-      // Возвращаем пустую строку. Slack закроет сессию, не выводя приватных серых сообщений.
       return new Response("", { status: 200 });
     }
 
@@ -176,21 +193,32 @@ export async function POST(request) {
 }
 
 async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = {}) {
-  const { slackChannelId } = slackParams;
+  const { slackChannelId, responseUrl } = slackParams;
   let slackThreadTs = null;
 
-  console.log(`[Background Analyzer] Запуск фонового процесса для папки: ${rootFolderId}`);
+  console.log(`[Background Analyzer] Скрипт вошел в фон для папки: ${rootFolderId}`);
 
   try {
-    // ШАГ 1: Публикуем стартовое сообщение (Теперь без thread_ts: null оно железно отправится!)
+    // ШАГ 1: Пытаемся отправить стартовое сообщение через основной API бота
     if (slackChannelId) {
       const initialMessage = `🚀 *Запуск анализа папки:* \`${rootFolderId}\`\n⏳ Начинаю подключение к сервисам Google и обход директорий. Ссылки на готовые таблицы будут приходить ответами в этот тред!`;
       slackThreadTs = await sendSlackMessage(slackChannelId, initialMessage);
 
-      if (!slackThreadTs) {
-        console.error("[Slack Error] Не удалось опубликовать сообщение. Проверьте логи.");
+      // ДИАГНОСТИЧЕСКИЙ ФОЛБЕК: Если бот вернул null (ошибка токена или прав)
+      if (!slackThreadTs && responseUrl) {
+        console.error(
+          "[Slack Fail Bypass] Основной метод chat.postMessage вернул ошибку. Запускаю экстренный канал связи через response_url...",
+        );
+
+        const warningBackupMsg =
+          `⚠️ *Внимание:* Бот не смог опубликовать сообщение через стандартный API.\n` +
+          `Но анализ папки \`${rootFolderId}\` *успешно выполняется на сервере в фоне*!\n` +
+          `_Проверьте переменную \`SLACK_BOT_TOKEN\` в вашем \`.env\` и наличие Scopes \`chat:write\` в панели Slack._`;
+
+        // Отправляем публичное уведомление в чат. Оно точно дойдет!
+        await sendSlackResponseUrl(responseUrl, warningBackupMsg, true);
       } else {
-        console.log(`[Slack Success] Стартовый тред успешно создан публично. TS: ${slackThreadTs}`);
+        console.log(`[Slack OK] Стартовое сообщение успешно опубликовано. TS треда: ${slackThreadTs}`);
       }
     }
 
@@ -199,13 +227,9 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
       googleAuth = await getGoogleAuth();
     } catch (authErr) {
       console.error("[Google Auth Error]", authErr.message);
-      if (slackChannelId && slackThreadTs) {
-        await sendSlackMessage(
-          slackChannelId,
-          `❌ *Критическая ошибка авторизации Google:* \`${authErr.message}\`.`,
-          slackThreadTs,
-        );
-      }
+      const errMsg = `❌ *Критическая ошибка авторизации Google:* \`${authErr.message}\`. Процесс остановлен.`;
+      if (slackChannelId && slackThreadTs) await sendSlackMessage(slackChannelId, errMsg, slackThreadTs);
+      else if (responseUrl) await sendSlackResponseUrl(responseUrl, errMsg, true);
       return;
     }
 
@@ -228,12 +252,10 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
 
     const accountSheetId = process.env.GOOGLE_MASTER_SHEET_ID;
     if (!accountSheetId) {
-      if (slackChannelId && slackThreadTs)
-        await sendSlackMessage(
-          slackChannelId,
-          "❌ *Критическая ошибка сервера:* В файле \`.env\` не задана переменная \`GOOGLE_MASTER_SHEET_ID\`.",
-          slackThreadTs,
-        );
+      const sheetErrMsg =
+        "❌ *Критическая ошибка сервера:* В файле \`.env\` не задана переменная \`GOOGLE_MASTER_SHEET_ID\`.";
+      if (slackChannelId && slackThreadTs) await sendSlackMessage(slackChannelId, sheetErrMsg, slackThreadTs);
+      else if (responseUrl) await sendSlackResponseUrl(responseUrl, sheetErrMsg, true);
       return;
     }
 
@@ -472,10 +494,13 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
           requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
         });
 
-        // ОТПРАВКА ССЫЛКИ В ТРЕД СЛАКА СРАЗУ ПО ГОТОВНОСТИ ПАПКИ
+        // УВЕДОМЛЕНИЕ: Если тред создался — пишем в него.
+        // Если тред создать не удалось — пишем ссылку прямо в канал через response_url!
+        const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
         if (slackChannelId && slackThreadTs) {
-          const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
           await sendSlackMessage(slackChannelId, folderReadyMsg, slackThreadTs);
+        } else if (responseUrl) {
+          await sendSlackResponseUrl(responseUrl, folderReadyMsg, true);
         }
 
         processedFoldersReport.push(`• *${folderName}* (Анализ успешно завершен): ${resultSheetUrl}`);
@@ -488,27 +513,25 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
 
     await processFolder(rootFolderId);
 
-    // ФИНАЛЬНЫЙ СУММАРНЫЙ ОТЧЕТ В ТРЕД СЛАКА
-    if (slackChannelId && slackThreadTs) {
-      const finalSlackSummary =
-        `🏁 *Весь рекурсивный анализ полностью завершен!*\n\n` +
-        `📈 *Итоги сессии:*\n` +
-        `• Всего новых папок: *${foldersAnalyzedCount}*\n` +
-        `• Всего размечено изображений: *${totalProcessedImages}*\n\n` +
-        `📂 *Реестр таблиц по папкам:*\n` +
-        (processedFoldersReport.length > 0 ? processedFoldersReport.join("\n") : "• Новых изображений не найдено.");
+    // ФИНАЛЬНЫЙ СУММАРНЫЙ ОТЧЕТ
+    const finalSlackSummary =
+      `🏁 *Весь рекурсивный анализ полностью завершен!*\n\n` +
+      `📈 *Итоги сессии:*\n` +
+      `• Всего новых папок: *${foldersAnalyzedCount}*\n` +
+      `• Всего размечено изображений: *${totalProcessedImages}*\n\n` +
+      `📂 *Реестр таблиц по папкам:*\n` +
+      (processedFoldersReport.length > 0 ? processedFoldersReport.join("\n") : "• Новых изображений не найдено.");
 
+    if (slackChannelId && slackThreadTs) {
       await sendSlackMessage(slackChannelId, finalSlackSummary, slackThreadTs);
+    } else if (responseUrl) {
+      await sendSlackResponseUrl(responseUrl, finalSlackSummary, true);
     }
   } catch (fatalBgError) {
     console.error("[Fatal Background Worker Error]:", fatalBgError.message);
-    if (slackChannelId && slackThreadTs) {
-      await sendSlackMessage(
-        slackChannelId,
-        `❌ *Критическая ошибка фонового процесса:* \`${fatalBgError.message}\``,
-        slackThreadTs,
-      );
-    }
+    const failMsg = `❌ *Критическая ошибка фонового процесса:* \`${fatalBgError.message}\``;
+    if (slackChannelId && slackThreadTs) await sendSlackMessage(slackChannelId, failMsg, slackThreadTs);
+    else if (responseUrl) await sendSlackResponseUrl(responseUrl, failMsg, true);
   }
 }
 
