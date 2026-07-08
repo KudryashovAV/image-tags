@@ -31,13 +31,15 @@ deploy:
     - echo "GOOGLE_REFRESH_TOKEN=$(cat $GOOGLE_REFRESH_TOKEN | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "GOOGLE_MASTER_SHEET_ID=$(cat $GOOGLE_MASTER_SHEET_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "SERPER_API_KEY=$(cat $SERPER_API_KEY | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
+    - echo "GOOGLE_GENERATION_ROOT_FOLDER_ID=$(cat $GOOGLE_GENERATION_ROOT_FOLDER_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
+    - echo "CONFIG_FILE_ID=$(cat $CONFIG_FILE_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
+    - echo "SLACK_BOT_TOKEN=$(cat $SLACK_BOT_TOKEN | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo " .env created"
     - echo " Installing dependencies (npm ci)..."
     - npm ci
     - rm -rf /srv/image-tags/.next
     - echo "Building..."
-    - 'unset TECH_WEBHOOK OPENAI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_ACCESS_TOKEN GOOGLE_REFRESH_TOKEN GOOGLE_MASTER_SHEET_ID SERPER_API_KEY && npm run build'
+    - 'unset TECH_WEBHOOK OPENAI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_ACCESS_TOKEN GOOGLE_REFRESH_TOKEN GOOGLE_MASTER_SHEET_ID SERPER_API_KEY GOOGLE_GENERATION_ROOT_FOLDER_ID CONFIG_FILE_ID SLACK_BOT_TOKEN && npm run build'
     - pm2 delete image-tags-app || true
-    - 'unset TECH_WEBHOOK OPENAI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_ACCESS_TOKEN GOOGLE_REFRESH_TOKEN GOOGLE_MASTER_SHEET_ID SERPER_API_KEY && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start'
+    - 'unset TECH_WEBHOOK OPENAI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_ACCESS_TOKEN GOOGLE_REFRESH_TOKEN GOOGLE_MASTER_SHEET_ID SERPER_API_KEY GOOGLE_GENERATION_ROOT_FOLDER_ID CONFIG_FILE_ID SLACK_BOT_TOKEN && pm2 start npm --name "image-tags-app" --cwd /srv/image-tags -- start'
     - pm2 save
-    
