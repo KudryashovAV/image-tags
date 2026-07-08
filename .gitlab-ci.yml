@@ -34,7 +34,7 @@ deploy:
     - echo "GOOGLE_GENERATION_ROOT_FOLDER_ID=$(cat $GOOGLE_GENERATION_ROOT_FOLDER_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "CONFIG_FILE_ID=$(cat $CONFIG_FILE_ID | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
     - echo "SLACK_BOT_TOKEN=$(cat $SLACK_BOT_TOKEN | grep -oP '(?<=\")[^\"]+(?=\")')" >> .env
-    - grep SLACK_BOT_TOKEN .env
+    - cat $SLACK_BOT_TOKEN
     - echo " .env created"
     - echo " Installing dependencies (npm ci)..."
     - npm ci
