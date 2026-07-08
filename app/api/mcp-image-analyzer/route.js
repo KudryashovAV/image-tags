@@ -169,7 +169,7 @@ export async function POST(request) {
   }
 }
 
-// УМНЫЙ АСИНХРОННЫЙ ФОНОВЫЙ ДВИЖОК
+// УМНЫЙ АСИНХРОННЫЙ ФОНОВЫЙ ДВИЖОК (ОТЛАДОЧНАЯ ВЕРСИЯ)
 async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = {}) {
   const { slackChannelId } = slackParams;
   let slackThreadTs = null;
@@ -177,14 +177,55 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
   console.log(`[Background Analyzer] Запуск фонового процесса для папки: ${rootFolderId}`);
 
   try {
-    // 1. АВТОРИЗАЦИЯ И ЧТЕНИЕ КОНФИГА ИЗ ФОНА
-    const { drive: baseDrive } = await getGoogleAuth();
+    // ШАГ 1: МГНОВЕННО ШЛЕМ СТАРТОВОЕ СООБЩЕНИЕ В СЛАК
+    // Делаем это ДО запросов к Google, чтобы сразу проверить связь со Slack!
+    if (slackChannelId) {
+      const initialMessage = `🚀 *Запуск анализа папки:* \`${rootFolderId}\`\n⏳ Начинаю подключение к сервисам Google и обход директорий. Ссылки на готовые таблицы будут приходить ответами в этот тред!`;
+      slackThreadTs = await sendSlackMessage(slackChannelId, initialMessage);
+
+      if (!slackThreadTs) {
+        console.error(
+          "[Slack Error] Не удалось опубликовать стартовое сообщение. Проверьте права бота (chat:write) или правильность токена SLACK_BOT_TOKEN.",
+        );
+      } else {
+        console.log(`[Slack Success] Публичное сообщение успешно создано. ID треда: ${slackThreadTs}`);
+      }
+    }
+
+    // ШАГ 2: ПОДКЛЮЧЕНИЕ К GOOGLE (Изолировано, с рапортом в Slack в случае падения)
+    let googleAuth;
+    try {
+      googleAuth = await getGoogleAuth();
+      console.log("[Google Auth] Авторизация в Google API пройдена успешно.");
+    } catch (authErr) {
+      console.error("[Google Auth Error] Сбой авторизации:", authErr.message);
+      // Если Google упал — бот пишет об этом прямо в тред Slack!
+      if (slackChannelId && slackThreadTs) {
+        await sendSlackMessage(
+          slackChannelId,
+          `❌ *Критическая ошибка авторизации Google:* \`${authErr.message}\`.\nПроверьте переменные \`GOOGLE_REFRESH_TOKEN\`, \`GOOGLE_CLIENT_ID\` и \`GOOGLE_CLIENT_SECRET\` в вашем файле \`.env\`.`,
+          slackThreadTs,
+        );
+      }
+      return; // Останавливаем воркер, без гугла дальше идти нельзя
+    }
+
+    const { drive: baseDrive } = googleAuth;
     let promptConfig = {};
+
+    // ШАГ 3: ЧТЕНИЕ КОНФИГА С ДИСКА
     try {
       const configResponse = await baseDrive.files.get({ fileId: CONFIG_FILE_ID, alt: "media" });
       promptConfig = typeof configResponse.data === "string" ? JSON.parse(configResponse.data) : configResponse.data;
     } catch (err) {
-      console.error("[Background] Не удалось прочитать дефолтный конфиг с диска, использую фолбеки.");
+      console.error("[Config Error] Не удалось прочитать дефолтный конфиг с диска:", err.message);
+      if (slackChannelId && slackThreadTs) {
+        await sendSlackMessage(
+          slackChannelId,
+          `⚠️ *Предупреждение:* Не удалось прочитать конфигурационный JSON-файл с Диска (\`${err.message}\`). Использую базовые настройки по умолчанию.`,
+          slackThreadTs,
+        );
+      }
     }
 
     // Формируем финальные настройки ИИ
@@ -195,19 +236,13 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
         rawOverrides.mandatorySuffix || promptConfig["mandatory"] || promptConfig["обязательная часть промта"],
     };
 
-    // 2. СИНХРОНИЗАЦИЯ СО СЛАКОМ: Публикуем официальный старт ТРЕДА
-    if (slackChannelId) {
-      const initialMessage = `🚀 *Запуск анализа папки:* \`${rootFolderId}\`\n⏳ Я начал рекурсивный обход директорий. Ссылки на готовые таблицы буду присылать ответам в этот тред по мере завершения!`;
-      slackThreadTs = await sendSlackMessage(slackChannelId, initialMessage);
-    }
-
     const accountSheetId = process.env.GOOGLE_MASTER_SHEET_ID;
     if (!accountSheetId) {
       console.error("[Background] Ошибка: GOOGLE_MASTER_SHEET_ID не задан в .env");
       if (slackChannelId && slackThreadTs)
         await sendSlackMessage(
           slackChannelId,
-          "❌ Критическая ошибка: Не задан GOOGLE_MASTER_SHEET_ID на сервере.",
+          "❌ *Критическая ошибка сервера:* В файле \`.env\` не задана переменная \`GOOGLE_MASTER_SHEET_ID\`.",
           slackThreadTs,
         );
       return;
@@ -217,8 +252,9 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
     let foldersAnalyzedCount = 0;
     const processedFoldersReport = [];
 
-    // Внутренняя рекурсивная функция
+    // Внутренняя рекурсивная функция обхода папок
     async function processFolder(folderId) {
+      // Переавторизуемся на каждом уровне рекурсии, чтобы иметь свежие токены
       const { drive, sheets } = await getGoogleAuth();
 
       const folderMeta = await drive.files.get({ fileId: folderId, fields: "name, webViewLink" });
@@ -449,7 +485,7 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
           requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
         });
 
-        // ОТПРАВКА ССЫЛКИ В ТРЕД СЛАКА СРАЗУ ПО ГОТОВНОСТИ ПАНКИ
+        // ОТПРАВКА ССЫЛКИ В ТРЕД СЛАКА СРАЗУ ПО ГОТОВНОСТИ ПАПКИ
         if (slackChannelId && slackThreadTs) {
           const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
           await sendSlackMessage(slackChannelId, folderReadyMsg, slackThreadTs);
@@ -483,7 +519,7 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
     if (slackChannelId && slackThreadTs) {
       await sendSlackMessage(
         slackChannelId,
-        `❌ Критическая ошибка фонового процесса: \`${fatalBgError.message}\``,
+        `❌ *Критическая ошибка фонового процесса:* \`${fatalBgError.message}\``,
         slackThreadTs,
       );
     }
