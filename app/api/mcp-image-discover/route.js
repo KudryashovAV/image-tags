@@ -353,8 +353,8 @@ async function backgroundDiscoverProcessor(initialSearchTerms, slackParams = {})
       await sendSlackResponseUrl(responseUrl, finalReportText);
     }
 
-    if (process.env.TECH_WEBHOOK) {
-      await fetch(process.env.TECH_WEBHOOK, {
+    if (process.env.DESIGN_SLACK_WEBHOOK) {
+      await fetch(process.env.DESIGN_SLACK_WEBHOOK, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: finalReportText }),
