@@ -57,6 +57,9 @@ async function sendSlackResponseUrl(url, text) {
   }
 }
 
+// ========================================================
+// ГЛАВНЫЙ ЭНДПОИНТ: Срабатывает за 10мс, защищен от таймаутов
+// ========================================================
 export async function POST(request) {
   try {
     const contentType = request.headers.get("content-type") || "";
@@ -64,17 +67,15 @@ export async function POST(request) {
     let responseUrl = null;
     let isSlack = false;
 
-    // 1. ДИФФЕРЕНЦИАЦИЯ ВХОДЯЩЕГО ПОТОКА
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
-      responseUrl = formData.get("response_url")?.toString() || null; // Забираем спасательный хук Slack
+      responseUrl = formData.get("response_url")?.toString() || null;
 
       spreadsheetId = slackText.split(" ")[0];
 
       if (!spreadsheetId) {
-        // Ошибки валидации оставляем приватными (ephemeral), чтобы не спамить в чат
         return NextResponse.json({
           response_type: "ephemeral",
           text: "❌ *Ошибка:* Вы не указали ID таблицы-донора. Используйте: \`/generate [ID_таблицы]\`",
@@ -89,10 +90,53 @@ export async function POST(request) {
       return NextResponse.json({ error: "Missing spreadsheetId" }, { status: 400 });
     }
 
+    // ТРИГГЕР: Отправляем тяжелую задачу в фон БЕЗ await.
+    // Скрипт пролетает дальше, не дожидаясь ответов от Google дисков
+    backgroundProcessor(spreadsheetId, responseUrl);
+
+    // Моментальный публичный ответ для Slack (укладываемся в лимит 3 сек)
+    if (isSlack) {
+      return NextResponse.json({
+        response_type: "in_channel",
+        text: `⏳ *Запрос на генерацию принят!* Разворачиваю фонового ИИ-воркера.\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n Начинаю проверку структуры таблиц и создание папок на Google Диске. Финальный отчет придет сюда по готовности...`,
+      });
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `Фоновый процесс генерации для таблицы ${spreadsheetId} успешно запущен.`,
+    });
+  } catch (error) {
+    console.error("Main generation endpoint error:", error);
+    if (request.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
+      return NextResponse.json({
+        response_type: "in_channel",
+        text: `❌ *Критическая ошибка запуска:* \`${error.message}\``,
+      });
+    }
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+async function moveFileToFolder(drive, fileId, folderId) {
+  const fileToken = await drive.files.get({ fileId, fields: "parents" });
+  const previousParents = fileToken.data.parents ? fileToken.data.parents.join(",") : "";
+  await drive.files.update({ fileId, addParents: folderId, removeParents: previousParents, fields: "id, parents" });
+}
+
+// ========================================================
+// АСИНХРОННЫЙ ФОНОВЫЙ ВОРКЕР: Тянет всю логику подготовки и работы
+// ========================================================
+async function backgroundProcessor(spreadsheetId, responseUrl) {
+  console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
+
+  try {
+    // Шаг 1. Авторизация и сбор данных таблицы (теперь внутри воркера)
     const { drive, sheets } = await getGoogleAuth();
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
+
     if (!rootFolderId || rootFolderId === "undefined") {
-      throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env или не считалась");
+      throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env");
     }
 
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
@@ -101,21 +145,25 @@ export async function POST(request) {
 
     const sheetData = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${firstSheetName}!A:Z` });
     const rows = sheetData.data.values || [];
+
     if (rows.length <= 1) {
-      if (isSlack)
-        return NextResponse.json({ response_type: "in_channel", text: "❌ *Ошибка:* Указанная таблица-донор пуста." });
-      return NextResponse.json({ error: "Таблица-донор пуста" }, { status: 400 });
+      if (responseUrl)
+        await sendSlackResponseUrl(
+          responseUrl,
+          `❌ *Ошибка отмены:* Указанная таблица-донор \`${spreadsheetId}\` пуста.`,
+        );
+      return;
     }
 
     const header = rows[0];
     const promptColIndex = header.findIndex((h) => h.trim() === "Промт для воссоздания");
     if (promptColIndex === -1) {
-      if (isSlack)
-        return NextResponse.json({
-          response_type: "in_channel",
-          text: '❌ *Ошибка:* Колонка "Промт для воссоздания" не найдена в таблице.',
-        });
-      return NextResponse.json({ error: 'Колонка "Промт для воссоздания" не найдена' }, { status: 400 });
+      if (responseUrl)
+        await sendSlackResponseUrl(
+          responseUrl,
+          `❌ *Ошибка отмены:* Колонка "Промт для воссоздания" не найдена в таблице \`${spreadsheetId}\`.`,
+        );
+      return;
     }
     const promptColLetter = columnToLetter(promptColIndex + 1);
 
@@ -128,6 +176,7 @@ export async function POST(request) {
       }
     }
 
+    // Шаг 2. Развертывание или поиск папок на Диске
     const todayStr = new Date().toLocaleDateString("ru-RU");
     const existingFolderCheck = await drive.files.list({
       q: `'${rootFolderId}' in parents and name contains 'Генерация от ${todayStr}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
@@ -245,66 +294,15 @@ export async function POST(request) {
       stateFileId = createState.data.id;
     }
 
-    // Запуск фонового воркера (Передаем responseUrl и ссылку на папку Диска)
-    backgroundProcessor(
-      stateData,
-      stateFileId,
-      gptFolderId,
-      geminiFolderId,
-      gptSheetId,
-      geminiSheetId,
-      responseUrl,
-      dateFolderUrl,
-    );
-
-    // 2. ИСПРАВЛЕНО: Теперь стартовый ответ возвращается как JSON in_channel (виден всем)
-    if (isSlack) {
-      return NextResponse.json({
-        response_type: "in_channel",
-        text:
-          `🚀 *Процесс генерации успешно запущен в фоне!*\n` +
-          `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
-          `⏳ *Всего промптов в очереди:* ${stateData.totalCount}\n` +
-          `📂 *Архив сегодняшней генерации на Диске:* ${dateFolderUrl}`,
-      });
+    // Информируем канал о том, что подготовка успешно завершена и пошла прямая отрисовка картинок ИИ
+    if (responseUrl) {
+      await sendSlackResponseUrl(
+        responseUrl,
+        `⚙️ *Подготовка завершена:* Задачи распределены. Всего промптов в работе: *${stateData.totalCount}*.\n📂 *Рабочий архив на сессию:* ${dateFolderUrl}\n🛸 Начинаю поочередный рендеринг через gpt-image-2 и Imagen 4 Ultra...`,
+      );
     }
 
-    return NextResponse.json({
-      success: true,
-      message: `Процесс генерации успешно запущен в фоне. Всего промптов в очереди: ${stateData.totalCount}.`,
-      folderUrl: dateFolderUrl,
-    });
-  } catch (error) {
-    console.error("Main generation endpoint error:", error);
-    if (request.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
-      return NextResponse.json({
-        response_type: "in_channel",
-        text: `❌ *Критическая ошибка сервера:* \`${error.message}\``,
-      });
-    }
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-}
-
-async function moveFileToFolder(drive, fileId, folderId) {
-  const fileToken = await drive.files.get({ fileId, fields: "parents" });
-  const previousParents = fileToken.data.parents ? fileToken.data.parents.join(",") : "";
-  await drive.files.update({ fileId, addParents: folderId, removeParents: previousParents, fields: "id, parents" });
-}
-
-// АСИНХРОННЫЙ ФОНОВЫЙ ВОРКЕР
-async function backgroundProcessor(
-  stateData,
-  stateFileId,
-  gptFolderId,
-  geminiFolderId,
-  gptSheetId,
-  geminiSheetId,
-  responseUrl,
-  dateFolderUrl,
-) {
-  try {
-    const { drive, sheets } = await getGoogleAuth();
+    // Шаг 3. Исполнение очереди задач
     const taskIds = Object.keys(stateData.progress);
 
     for (const id of taskIds) {
@@ -396,7 +394,7 @@ async function backgroundProcessor(
 
     console.log("[Background Worker] Все доступные задачи из очереди обработаны.");
 
-    // 3. ДОБАВЛЕНО: Публикация итогового отчета для всего канала по завершении работы воркера
+    // Шаг 4. Публикация итогового отчета
     if (responseUrl) {
       const finalSummaryText =
         `🏁 *Массовая High-Res генерация успешно завершена!*\n\n` +
@@ -410,6 +408,8 @@ async function backgroundProcessor(
     }
   } catch (criticalWorkerError) {
     console.error("[Fatal Worker Error] Фоновый процесс полностью остановлен:", criticalWorkerError.message);
+    const failMsg = `❌ *Критический сбой фонового воркера:* \`${criticalWorkerError.message}\``;
+    if (responseUrl) await sendSlackResponseUrl(responseUrl, failMsg);
   }
 }
 
