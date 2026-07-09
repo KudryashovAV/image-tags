@@ -45,8 +45,35 @@ function columnToLetter(column) {
 
 export async function POST(request) {
   try {
-    const { spreadsheetId } = await request.json();
-    if (!spreadsheetId) return NextResponse.json({ error: "Missing spreadsheetId" }, { status: 400 });
+    const contentType = request.headers.get("content-type") || "";
+    let spreadsheetId = null;
+    let isSlack = false;
+
+    // 1. ДИФФЕРЕНЦИАЦИЯ ВХОДЯЩЕГО ПОТОКА: Проверяем, пришел запрос из Slack или обычный JSON
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      isSlack = true;
+      const formData = await request.formData();
+      // Slack передает текст, написанный после команды, в поле 'text'
+      const slackText = (formData.get("text") || "").trim();
+
+      // Берем первое слово (на случай, если пользователь случайно ввел пробелы)
+      spreadsheetId = slackText.split(" ")[0];
+
+      if (!spreadsheetId) {
+        return new Response(
+          "❌ *Ошибка:* Вы не указали ID таблицы-донора. Используйте: \`/ваша_команда [ID_таблицы]\`",
+          { status: 200 },
+        );
+      }
+    } else {
+      // Стандартный JSON-парсинг для ручных POST-запросов
+      const body = await request.json();
+      spreadsheetId = body.spreadsheetId;
+    }
+
+    if (!spreadsheetId) {
+      return NextResponse.json({ error: "Missing spreadsheetId" }, { status: 400 });
+    }
 
     const { drive, sheets } = await getGoogleAuth();
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
@@ -60,12 +87,18 @@ export async function POST(request) {
 
     const sheetData = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${firstSheetName}!A:Z` });
     const rows = sheetData.data.values || [];
-    if (rows.length <= 1) return NextResponse.json({ error: "Таблица-донор пуста" }, { status: 400 });
+    if (rows.length <= 1) {
+      if (isSlack) return new Response("❌ *Ошибка:* Указанная таблица-донор пуста.", { status: 200 });
+      return NextResponse.json({ error: "Таблица-донор пуста" }, { status: 400 });
+    }
 
     const header = rows[0];
     const promptColIndex = header.findIndex((h) => h.trim() === "Промт для воссоздания");
-    if (promptColIndex === -1)
+    if (promptColIndex === -1) {
+      if (isSlack)
+        return new Response('❌ *Ошибка:* Колонка "Промт для воссоздания" не найдена в таблице.', { status: 200 });
       return NextResponse.json({ error: 'Колонка "Промт для воссоздания" не найдена' }, { status: 400 });
+    }
     const promptColLetter = columnToLetter(promptColIndex + 1);
 
     const tasks = [];
@@ -160,7 +193,6 @@ export async function POST(request) {
       geminiSheetId = geminiSheet.data.spreadsheetId;
       await moveFileToFolder(drive, geminiSheetId, geminiFolderId);
 
-      // ДОБАВЛЕН КОЛОНКА «ВРЕМЯ ГЕНЕРАЦИИ» В ШАПКУ ТАБЛИЦЫ
       const headers = [
         ["Ссылка на донора", "Превью (250x250)", "Ссылка на изображение", "Время генерации", "Промт-донор"],
       ];
@@ -195,7 +227,19 @@ export async function POST(request) {
       stateFileId = createState.data.id;
     }
 
+    // Запуск фонового воркера (НЕ блокирует HTTP ответ, выполняется параллельно)
     backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFolderId, gptSheetId, geminiSheetId);
+
+    // 2. ДИФФЕРЕНЦИАЦИЯ ОТВЕТА: Форматируем ответ под требования Slack или под JSON
+    if (isSlack) {
+      return new Response(
+        `🚀 *Процесс генерации успешно запущен в фоне!*\n` +
+          `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
+          `⏳ *Всего промптов в очереди:* ${stateData.totalCount}\n` +
+          `📂 *Архив сегодняшней генерации на Диске:* ${dateFolderUrl}`,
+        { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+      );
+    }
 
     return NextResponse.json({
       success: true,
@@ -204,6 +248,9 @@ export async function POST(request) {
     });
   } catch (error) {
     console.error("Main generation endpoint error:", error);
+    if (request.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
+      return new Response(`❌ *Критическая ошибка сервера:* \`${error.message}\``, { status: 200 });
+    }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
@@ -232,12 +279,11 @@ async function backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFo
 
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
 
-        // --- OpenAI gpt-image-2 (ТАЙМ-ТРЕКИНГ ВКЛЮЧЕН) ---
+        // --- OpenAI gpt-image-2 ---
         let gptFileUrl = "Ошибка";
         let gptDurationStr = "Ошибка";
         try {
-          const gptStartTime = performance.now(); // Старт таймера OpenAI
-
+          const gptStartTime = performance.now();
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
@@ -260,13 +306,11 @@ async function backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFo
             gptBase64 = imageData.b64_json;
           }
 
-          const gptEndTime = performance.now(); // Стоп таймера OpenAI
+          const gptEndTime = performance.now();
           gptDurationStr = `${((gptEndTime - gptStartTime) / 1000).toFixed(2)} сек`;
 
           if (gptBase64) {
             gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
-
-            // Формируем строку с учетом времени (Столбец D)
             const gptRow = [task.cellUrl, `=IMAGE("${gptFileUrl}")`, gptFileUrl, gptDurationStr, task.prompt];
             await appendRowAndResize(sheets, gptSheetId, gptRow);
           }
@@ -274,21 +318,17 @@ async function backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFo
           console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
         }
 
-        // --- GEMINI IMAGEN 4 ULTRA (ТАЙМ-ТРЕКИНГ ВКЛЮЧЕН) ---
+        // --- GEMINI IMAGEN 4 ULTRA ---
         let geminiFileUrl = "Ошибка";
         let geminiDurationStr = "Ошибка";
         try {
-          const geminiStartTime = performance.now(); // Старт таймера Gemini
-
+          const geminiStartTime = performance.now();
           const imagenBase64 = await generateImagen3(task.prompt);
-
-          const geminiEndTime = performance.now(); // Стоп таймера Gemini
+          const geminiEndTime = performance.now();
           geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
 
           if (imagenBase64) {
             geminiFileUrl = await uploadBase64ToDrive(drive, imagenBase64, `gemini_art_${id}.png`, geminiFolderId);
-
-            // Формируем строку с учетом времени (Столбец D)
             const geminiRow = [
               task.cellUrl,
               `=IMAGE("${geminiFileUrl}")`,
@@ -353,7 +393,6 @@ async function generateImagen3(clientPrompt) {
   const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
 
   if (!base64Image) {
-    console.error("Ответ от Imagen 4 Ultra получен, но не содержит байтов изображения:", JSON.stringify(data));
     throw new Error("Imagen 4 Ultra API не вернул байты изображения.");
   }
 
@@ -382,7 +421,7 @@ async function updateStateFile(drive, fileId, stateData) {
 async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
   const appendRes = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: "Лог!A:E", // Расширили диапазон до E, так как добавилась 5-я колонка
+    range: "Лог!A:E",
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [rowValues] },
   });
