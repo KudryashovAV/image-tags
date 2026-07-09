@@ -43,30 +43,44 @@ function columnToLetter(column) {
   return letter || "A";
 }
 
+// Вспомогательная функция отправки ответов через response_url Slack
+async function sendSlackResponseUrl(url, text) {
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response_type: "in_channel", text: text }),
+    });
+  } catch (e) {
+    console.error("[Slack API Error response_url]:", e.message);
+  }
+}
+
 export async function POST(request) {
   try {
     const contentType = request.headers.get("content-type") || "";
     let spreadsheetId = null;
+    let responseUrl = null;
     let isSlack = false;
 
-    // 1. ДИФФЕРЕНЦИАЦИЯ ВХОДЯЩЕГО ПОТОКА: Проверяем, пришел запрос из Slack или обычный JSON
+    // 1. ДИФФЕРЕНЦИАЦИЯ ВХОДЯЩЕГО ПОТОКА
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
-      // Slack передает текст, написанный после команды, в поле 'text'
       const slackText = (formData.get("text") || "").trim();
+      responseUrl = formData.get("response_url")?.toString() || null; // Забираем спасательный хук Slack
 
-      // Берем первое слово (на случай, если пользователь случайно ввел пробелы)
       spreadsheetId = slackText.split(" ")[0];
 
       if (!spreadsheetId) {
-        return new Response(
-          "❌ *Ошибка:* Вы не указали ID таблицы-донора. Используйте: \`/ваша_команда [ID_таблицы]\`",
-          { status: 200 },
-        );
+        // Ошибки валидации оставляем приватными (ephemeral), чтобы не спамить в чат
+        return NextResponse.json({
+          response_type: "ephemeral",
+          text: "❌ *Ошибка:* Вы не указали ID таблицы-донора. Используйте: \`/generate [ID_таблицы]\`",
+        });
       }
     } else {
-      // Стандартный JSON-парсинг для ручных POST-запросов
       const body = await request.json();
       spreadsheetId = body.spreadsheetId;
     }
@@ -88,7 +102,8 @@ export async function POST(request) {
     const sheetData = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${firstSheetName}!A:Z` });
     const rows = sheetData.data.values || [];
     if (rows.length <= 1) {
-      if (isSlack) return new Response("❌ *Ошибка:* Указанная таблица-донор пуста.", { status: 200 });
+      if (isSlack)
+        return NextResponse.json({ response_type: "in_channel", text: "❌ *Ошибка:* Указанная таблица-донор пуста." });
       return NextResponse.json({ error: "Таблица-донор пуста" }, { status: 400 });
     }
 
@@ -96,7 +111,10 @@ export async function POST(request) {
     const promptColIndex = header.findIndex((h) => h.trim() === "Промт для воссоздания");
     if (promptColIndex === -1) {
       if (isSlack)
-        return new Response('❌ *Ошибка:* Колонка "Промт для воссоздания" не найдена в таблице.', { status: 200 });
+        return NextResponse.json({
+          response_type: "in_channel",
+          text: '❌ *Ошибка:* Колонка "Промт для воссоздания" не найдена в таблице.',
+        });
       return NextResponse.json({ error: 'Колонка "Промт для воссоздания" не найдена' }, { status: 400 });
     }
     const promptColLetter = columnToLetter(promptColIndex + 1);
@@ -227,18 +245,28 @@ export async function POST(request) {
       stateFileId = createState.data.id;
     }
 
-    // Запуск фонового воркера (НЕ блокирует HTTP ответ, выполняется параллельно)
-    backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFolderId, gptSheetId, geminiSheetId);
+    // Запуск фонового воркера (Передаем responseUrl и ссылку на папку Диска)
+    backgroundProcessor(
+      stateData,
+      stateFileId,
+      gptFolderId,
+      geminiFolderId,
+      gptSheetId,
+      geminiSheetId,
+      responseUrl,
+      dateFolderUrl,
+    );
 
-    // 2. ДИФФЕРЕНЦИАЦИЯ ОТВЕТА: Форматируем ответ под требования Slack или под JSON
+    // 2. ИСПРАВЛЕНО: Теперь стартовый ответ возвращается как JSON in_channel (виден всем)
     if (isSlack) {
-      return new Response(
-        `🚀 *Процесс генерации успешно запущен в фоне!*\n` +
+      return NextResponse.json({
+        response_type: "in_channel",
+        text:
+          `🚀 *Процесс генерации успешно запущен в фоне!*\n` +
           `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
           `⏳ *Всего промптов в очереди:* ${stateData.totalCount}\n` +
           `📂 *Архив сегодняшней генерации на Диске:* ${dateFolderUrl}`,
-        { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } },
-      );
+      });
     }
 
     return NextResponse.json({
@@ -249,7 +277,10 @@ export async function POST(request) {
   } catch (error) {
     console.error("Main generation endpoint error:", error);
     if (request.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
-      return new Response(`❌ *Критическая ошибка сервера:* \`${error.message}\``, { status: 200 });
+      return NextResponse.json({
+        response_type: "in_channel",
+        text: `❌ *Критическая ошибка сервера:* \`${error.message}\``,
+      });
     }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -262,7 +293,16 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // АСИНХРОННЫЙ ФОНОВЫЙ ВОРКЕР
-async function backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFolderId, gptSheetId, geminiSheetId) {
+async function backgroundProcessor(
+  stateData,
+  stateFileId,
+  gptFolderId,
+  geminiFolderId,
+  gptSheetId,
+  geminiSheetId,
+  responseUrl,
+  dateFolderUrl,
+) {
   try {
     const { drive, sheets } = await getGoogleAuth();
     const taskIds = Object.keys(stateData.progress);
@@ -353,7 +393,21 @@ async function backgroundProcessor(stateData, stateFileId, gptFolderId, geminiFo
         } catch (e) {}
       }
     }
+
     console.log("[Background Worker] Все доступные задачи из очереди обработаны.");
+
+    // 3. ДОБАВЛЕНО: Публикация итогового отчета для всего канала по завершении работы воркера
+    if (responseUrl) {
+      const finalSummaryText =
+        `🏁 *Массовая High-Res генерация успешно завершена!*\n\n` +
+        `📈 *Итоги сессии:*\n` +
+        `• Всего промптов обработано: *${stateData.totalCount}*\n` +
+        `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+        `📂 Лог-таблицы и папки с png-оригиналами сохранены здесь:\n` +
+        `👉 *Ссылка на архив на Диске:* ${dateFolderUrl}`;
+
+      await sendSlackResponseUrl(responseUrl, finalSummaryText);
+    }
   } catch (criticalWorkerError) {
     console.error("[Fatal Worker Error] Фоновый процесс полностью остановлен:", criticalWorkerError.message);
   }
