@@ -6,6 +6,7 @@ import { Readable } from "stream";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
+const SINGLE_PROMPT_FOLDER_ID = "1aCmvzt6Vbw4glrHE-1BwUFZThW775Odt";
 
 // БУЛЛЕТПРУФ АВТОРИЗАЦИЯ GOOGLE
 async function getGoogleAuth() {
@@ -43,12 +44,12 @@ function columnToLetter(column) {
   return letter || "A";
 }
 
-// НАДЁЖНАЯ ФУНКЦИЯ ДЛЯ СВЯЗИ СО SLACK (Возвращает TS сообщения для создания треда)
+// НАДЁЖНАЯ ФУНКЦИЯ ДЛЯ СВЯЗИ СО SLACK
 async function sendSlackMessage(token, channel, text, threadTs = null) {
   if (!token || !channel) return null;
   try {
     const body = { channel, text };
-    if (threadTs) body.thread_ts = threadTs; // Если передан родительский TS — сообщение уйдет в тред
+    if (threadTs) body.thread_ts = threadTs;
 
     const res = await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
@@ -64,7 +65,7 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
       console.error("[Slack API Error]:", data.error);
       return null;
     }
-    return data.ts; // Возвращаем timestamp созданного сообщения
+    return data.ts;
   } catch (e) {
     console.error("[Slack Fetch Error]:", e.message);
     return null;
@@ -72,53 +73,84 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ЭНДПОИНТ: Принимает задачу и мгновенно отвечает
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (ВХОДНОЙ ФИЛЬТР)
 // ========================================================
 export async function POST(request) {
   try {
     const contentType = request.headers.get("content-type") || "";
     let spreadsheetId = null;
+    let singlePrompt = null;
+    let selectedModel = null; // 'gpt', 'gemini' или 'both'
     let channelId = null;
     let isSlack = false;
 
+    // СЦЕНАРИЙ А: Запрос прилетел из Slack
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
-      channelId = formData.get("channel_id")?.toString() || null; // Вытаскиваем ID канала, откуда пришла команда
+      channelId = formData.get("channel_id")?.toString() || null;
 
-      spreadsheetId = slackText.split(" ")[0];
-
-      if (!spreadsheetId) {
+      if (!slackText) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: "❌ *Ошибка:* Вы не указали ID таблицы-донора. Используйте: \`/generate [ID_таблицы]\`",
+          text: "❌ *Ошибка:* Пустой запрос. Используйте:\n• Таблицы: \`/generate [ID_таблицы]\`\n• Промпт: \`/generate [gpt/gemini] Текст промпта\` или просто \`/generate Текст промпта\` (для обеих ИИ)",
         });
       }
+
+      const words = slackText.split(" ");
+      const firstWord = words[0].toLowerCase();
+
+      if (firstWord === "gpt" || firstWord === "gemini") {
+        // Одиночный режим с явным указанием ИИ
+        selectedModel = firstWord;
+        singlePrompt = slackText.substring(slackText.indexOf(" ") + 1).trim();
+      } else if (words.length > 1 || words[0].length < 35 || words[0].length > 50) {
+        // ИСПРАВЛЕНО: Если слов много ИЛИ первое слово не подходит под длину ID таблицы (44 символа)
+        // Значит, пользователь опустил название ИИ и сразу пишет промпт для обеих нейросетей!
+        selectedModel = "both";
+        singlePrompt = slackText;
+      } else {
+        // Пакетный режим по таблице-донору
+        spreadsheetId = words[0];
+      }
     } else {
+      // СЦЕНАРИЙ Б: Обычный JSON запрос
       const body = await request.json();
-      spreadsheetId = body.spreadsheetId;
+      if (body.prompt) {
+        singlePrompt = body.prompt;
+        selectedModel = body.model?.toLowerCase() || "both";
+      } else {
+        spreadsheetId = body.spreadsheetId;
+      }
     }
 
-    if (!spreadsheetId) {
-      return NextResponse.json({ error: "Missing spreadsheetId" }, { status: 400 });
-    }
+    // РАСПРЕДЕЛЕНИЕ ПОТОКОВ ВОРКЕРОВ
+    if (singlePrompt) {
+      backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
 
-    // ТРИГГЕР: Выстреливаем тяжелый воркер в фон
-    backgroundProcessor(spreadsheetId, channelId);
-
-    // Моментальный ответ Slack-серверу (выдаем ephemeral, чтобы подтвердить получение)
-    if (isSlack) {
+      if (isSlack) {
+        const modelLabel = selectedModel === "both" ? "GPT + GEMINI" : selectedModel.toUpperCase();
+        return NextResponse.json({
+          response_type: "ephemeral",
+          text: `⏳ *Запрос принят!* Модель: \`${modelLabel}\`. Разворачиваю одиночный рендеринг в общем канале...`,
+        });
+      }
       return NextResponse.json({
-        response_type: "ephemeral",
-        text: `⏳ *Запрос принят!* Бот начинает публикацию сессии в канал...`,
+        success: true,
+        message: `Фоновый процесс одиночной генерации (${selectedModel}) запущен.`,
       });
-    }
+    } else {
+      backgroundProcessor(spreadsheetId, channelId);
 
-    return NextResponse.json({
-      success: true,
-      message: `Фоновый процесс генерации для таблицы ${spreadsheetId} успешно запущен.`,
-    });
+      if (isSlack) {
+        return NextResponse.json({
+          response_type: "ephemeral",
+          text: `⏳ *Запрос на пакетную генерацию принят!* Начинаю развертывание сессии по таблице-донору в общем канале...`,
+        });
+      }
+      return NextResponse.json({ success: true, message: `Пакетный фоновый процесс генерации запущен.` });
+    }
   } catch (error) {
     console.error("Main generation endpoint error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -132,32 +164,224 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// АСИНХРОННЫЙ ФОНОВЫЙ ВОРКЕР: Ведет генерацию строго внутри треда
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ПОДДЕРЖКА ДВОЙНОГО РЕЖИМА)
 // ========================================================
-async function backgroundProcessor(spreadsheetId, channelId) {
-  console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
-
+async function backgroundSingleProcessor(prompt, model, channelId) {
+  console.log(`[Single Worker] Старт одиночной генерации для модели: ${model}`);
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
 
-  // ШАГ 0: Создаем корневое сообщение в общем канале и фиксируем его Timestamp
+  const modelLabel = model === "both" ? "GPT + GEMINI" : model.toUpperCase();
+
   if (slackToken && channelId) {
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
-      `🚀 *Запуск массовой High-Res генерации изображения!*\n` +
+      `🎨 *Запуск одиночной High-Res генерации изображения!*\n` +
+        `• *Модель ИИ:* \`${modelLabel}\`\n` +
+        `• *Промт:* \`${prompt}\`\n` +
+        `🛠️ Подключаюсь к Google Диску и проверяю лог одиночных генераций...`,
+    );
+  }
+
+  try {
+    const { drive, sheets } = await getGoogleAuth();
+
+    // Находим или создаем общую таблицу "Лог одиночных генераций" строго в целевой папке
+    const sheetCheck = await drive.files.list({
+      q: `'${SINGLE_PROMPT_FOLDER_ID}' in parents and name = 'Лог одиночных генераций' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
+      fields: "files(id)",
+    });
+
+    let targetSheetId;
+    if (sheetCheck.data.files && sheetCheck.data.files.length > 0) {
+      targetSheetId = sheetCheck.data.files[0].id;
+    } else {
+      console.log("[Single Worker] Таблица логов не найдена. Создаю новую...");
+      const newSheet = await sheets.spreadsheets.create({
+        requestBody: {
+          properties: { title: "Лог одиночных генераций" },
+          sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+        },
+      });
+      targetSheetId = newSheet.data.spreadsheetId;
+      await moveFileToFolder(drive, targetSheetId, SINGLE_PROMPT_FOLDER_ID);
+
+      const headers = [["Ссылка на изображение", "Превью (250x250)", "Промт", "Время генерации", "Модель ИИ"]];
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: targetSheetId,
+        range: "Лог!A1",
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values: headers },
+      });
+    }
+
+    await sendSlackMessage(
+      slackToken,
+      channelId,
+      `🚀 База данных готова. Передаю задачу на рендеринг...`,
+      rootThreadTs,
+    );
+
+    // Определяем список моделей для запуска
+    const modelsToRun = model === "both" ? ["gpt", "gemini"] : [model];
+
+    for (const currentModel of modelsToRun) {
+      let imageBase64 = null;
+      let durationStr = "Ошибка";
+      const strictPrompt = `Use the provided prompt verbatim without any modifications: ${prompt}`;
+
+      if (currentModel === "gpt") {
+        const startTime = performance.now();
+        try {
+          const dallEApiResponse = await openai.images.generate({
+            model: "gpt-image-2",
+            prompt: strictPrompt,
+            size: "1440x2560",
+            quality: "high",
+          });
+          const imageData = dallEApiResponse?.data?.[0];
+          imageBase64 = imageData?.url
+            ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
+            : imageData?.b64_json;
+
+          const endTime = performance.now();
+          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+        } catch (e) {
+          console.error("[Single Worker GPT Error]:", e.message);
+          await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка GPT:* \`${e.message}\``, rootThreadTs);
+          continue;
+        }
+      } else if (currentModel === "gemini") {
+        const startTime = performance.now();
+        try {
+          imageBase64 = await generateImagen3(prompt);
+          const endTime = performance.now();
+          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+        } catch (e) {
+          console.error("[Single Worker Gemini Error]:", e.message);
+          await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini:* \`${e.message}\``, rootThreadTs);
+          continue;
+        }
+      }
+
+      if (imageBase64) {
+        // Формируем безопасное файловое имя с названием модели и временем
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, "0");
+        const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+        const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
+
+        // Загружаем готовый файл в фиксированную папку
+        const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
+
+        // Логируем запись и применяем умные авто-размеры и авто-переносы слов
+        const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, currentModel.toUpperCase()];
+        await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
+
+        const intermediateMsg =
+          `✅ *Генерация через ${currentModel.toUpperCase()} завершена!*\n` +
+          `• Время рендеринга: *${durationStr}*\n` +
+          `👉 *Ссылка на High-Res:* ${fileUrl}`;
+
+        await sendSlackMessage(slackToken, channelId, intermediateMsg, rootThreadTs);
+      }
+    }
+
+    const finalSuccessMsg = `🏁 *Одиночная сессия полностью завершена!* Все результаты занесены в таблицу логов папки \`${SINGLE_PROMPT_FOLDER_ID}\`.`;
+    await sendSlackMessage(slackToken, channelId, finalSuccessMsg, rootThreadTs);
+  } catch (error) {
+    console.error("[Single Worker Error]:", error.message);
+    await sendSlackMessage(
+      slackToken,
+      channelId,
+      `❌ *Критический сбой одиночного процессора:* \`${error.message}\``,
+      rootThreadTs,
+    );
+  }
+}
+
+// ИСПРАВЛЕНО: Специфический функционал умного форматирования ячеек и автопереноса промпта
+async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
+  const appendRes = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "Лог!A:E",
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [rowValues] },
+  });
+
+  const updatedRange = appendRes.data.updates.updatedRange;
+  const rowNumber = parseInt(updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        // 1. Принудительная высота строки (250px) под картинку
+        {
+          updateDimensionProperties: {
+            range: { sheetId: 0, dimension: "ROWS", startIndex: rowNumber - 1, endIndex: rowNumber },
+            properties: { pixelSize: 250 },
+            fields: "pixelSize",
+          },
+        },
+        // 2. Ширина колонки Б под превью изображения (250px)
+        {
+          updateDimensionProperties: {
+            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+            properties: { pixelSize: 250 },
+            fields: "pixelSize",
+          },
+        },
+        // 3. АВТОПЕРЕНОС СЛОВ: Настройка ячейки промпта (Колонка C, индекс 2), чтобы текст не скрывался на листе
+        {
+          repeatCell: {
+            range: {
+              sheetId: 0,
+              startRowIndex: rowNumber - 1,
+              endRowIndex: rowNumber,
+              startColumnIndex: 2,
+              endColumnIndex: 3,
+            },
+            cell: { userEnteredFormat: { wrapStrategy: "WRAP" } },
+            fields: "userEnteredFormat.wrapStrategy",
+          },
+        },
+        // 4. АВТОШИРИНА КОЛОНКИ: Растягивает колонку C под самый длинный текст
+        {
+          autoResizeDimensions: {
+            dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 },
+          },
+        },
+      ],
+    },
+  });
+}
+
+// ========================================================
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ
+// ========================================================
+async function backgroundProcessor(spreadsheetId, channelId) {
+  console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  let rootThreadTs = null;
+
+  if (slackToken && channelId) {
+    rootThreadTs = await sendSlackMessage(
+      slackToken,
+      channelId,
+      `🚀 *Запуск массовой High-Res генерации изображений по списку!*\n` +
         `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
         `🛠️ Начинаю авторизацию и развертывание файловой структуры на Google Диске...`,
     );
   }
 
   try {
-    // Шаг 1. Авторизация и сбор данных таблицы
     const { drive, sheets } = await getGoogleAuth();
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
 
     if (!rootFolderId || rootFolderId === "undefined") {
-      throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env");
+      throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана in .env");
     }
 
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
@@ -199,7 +423,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       }
     }
 
-    // Шаг 2. Развертывание или поиск папок на Диске
     const todayStr = new Date().toLocaleDateString("ru-RU");
     const existingFolderCheck = await drive.files.list({
       q: `'${rootFolderId}' in parents and name contains 'Генерация от ${todayStr}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
@@ -317,22 +540,17 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       stateFileId = createState.data.id;
     }
 
-    // ОТПРАВЛЯЕМ ОБНОВЛЕНИЕ СТАТУСА В ТРЕД (Передаем rootThreadTs)
     await sendSlackMessage(
       slackToken,
       channelId,
-      `⚙️ *Структура развернута:* Промптов найдено в доноре: *${stateData.totalCount}*.\n📂 *Рабочий архив Диска:* ${dateFolderUrl}\n🛸 Включаю нейросети, начинаю рендеринг картинок...`,
+      `⚙️ *Структура развернута:* Найдено задач в доноре: *${stateData.totalCount}*.\n📂 *Рабочий архив Диска:* ${dateFolderUrl}\n🛸 Включаю нейросети, запускаю параллельный рендеринг...`,
       rootThreadTs,
     );
 
-    // Шаг 3. Исполнение очереди задач
     const taskIds = Object.keys(stateData.progress);
-
     for (const id of taskIds) {
       const task = stateData.progress[id];
       if (task.status === "completed" || task.status === "failed") continue;
-
-      console.log(`[Background Worker] Обработка строки ID: ${id}`);
 
       try {
         task.status = "processing";
@@ -351,21 +569,10 @@ async function backgroundProcessor(spreadsheetId, channelId) {
             size: "1440x2560",
             quality: "high",
           });
-
-          if (!dallEApiResponse?.data?.[0]) {
-            throw new Error("Ответ от OpenAI пришел, но массив 'data' пуст.");
-          }
-
-          const imageData = dallEApiResponse.data[0];
-          let gptBase64 = null;
-
-          if (imageData.url) {
-            const imageDownloadRes = await fetch(imageData.url);
-            const arrayBuffer = await imageDownloadRes.arrayBuffer();
-            gptBase64 = Buffer.from(arrayBuffer).toString("base64");
-          } else if (imageData.b64_json) {
-            gptBase64 = imageData.b64_json;
-          }
+          const imageData = dallEApiResponse?.data?.[0];
+          let gptBase64 = imageData?.url
+            ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
+            : imageData?.b64_json;
 
           const gptEndTime = performance.now();
           gptDurationStr = `${((gptEndTime - gptStartTime) / 1000).toFixed(2)} сек`;
@@ -407,7 +614,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         stateData.completedCount++;
         await updateStateFile(drive, stateFileId, stateData);
       } catch (lineError) {
-        console.error(`[Line Error] Критическая ошибка на строке ${id}:`, lineError.message);
         task.status = "failed";
         try {
           await updateStateFile(drive, stateFileId, stateData);
@@ -415,81 +621,56 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       }
     }
 
-    console.log("[Background Worker] Все доступные задачи из очереди обработаны.");
-
-    // Шаг 4. Финальный отчет строго ВНУТРЬ ТРЕДА
-    const finalSummaryText =
-      `🏁 *Массовая High-Res генерация успешно завершена!*\n\n` +
-      `📈 *Итоги сессии:*\n` +
-      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
-      `👉 *Ссылка на архив на Диске:* ${dateFolderUrl}`;
-
+    const finalSummaryText = `🏁 *Массовая генерация успешно завершена!*\n• Всего промптов: *${stateData.totalCount}*\n• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n👉 *Ссылка на архив Диска:* ${dateFolderUrl}`;
     await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
-    console.error("[Fatal Worker Error] Фоновый процесс полностью остановлен:", criticalWorkerError.message);
-    const failMsg = `❌ *Критический сбой фонового воркера:* \`${criticalWorkerError.message}\``;
-    await sendSlackMessage(slackToken, channelId, failMsg, rootThreadTs);
+    await sendSlackMessage(
+      slackToken,
+      channelId,
+      `❌ *Критический сбой воркера:* \`${criticalWorkerError.message}\``,
+      rootThreadTs,
+    );
   }
 }
 
 async function generateImagen3(clientPrompt) {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "imagen-4.0-ultra-generate-001";
-
-  if (!apiKey) {
-    throw new Error("Переменная GEMINI_API_KEY не задана в .env");
-  }
+  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:predict?key=${apiKey}`;
-
-  const body = {
-    instances: [{ prompt: clientPrompt }],
-    parameters: {
-      sampleCount: 1,
-      aspectRatio: "9:16",
-      outputMimeType: "image/png",
-    },
-  };
-
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      instances: [{ prompt: clientPrompt }],
+      parameters: { sampleCount: 1, aspectRatio: "9:16", outputMimeType: "image/png" },
+    }),
   });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Google Imagen 4 Ultra API Error: ${response.statusText} - ${errText}`);
-  }
-
+  if (!response.ok) throw new Error(`Google Imagen API Error: ${response.statusText}`);
   const data = await response.json();
   const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
-
-  if (!base64Image) {
-    throw new Error("Imagen 4 Ultra API не вернул байты изображения.");
-  }
-
+  if (!base64Image) throw new Error("Imagen 4 Ultra API не вернул байты.");
   return base64Image;
 }
 
 async function uploadBase64ToDrive(drive, base64Data, filename, parentFolderId) {
   const buffer = Buffer.from(base64Data, "base64");
-  const readableStream = Readable.from(buffer);
-
   const file = await drive.files.create({
     requestBody: { name: filename, parents: [parentFolderId], mimeType: "image/png" },
-    media: { mimeType: "image/png", body: readableStream },
+    media: { mimeType: "image/png", body: Readable.from(buffer) },
     fields: "id, webViewLink",
   });
-
   await drive.permissions.create({ fileId: file.data.id, requestBody: { role: "reader", type: "anyone" } });
   return `https://drive.google.com/thumbnail?id=${file.data.id}&sz=w1000`;
 }
 
 async function updateStateFile(drive, fileId, stateData) {
-  const readableStream = Readable.from(JSON.stringify(stateData, null, 2));
-  await drive.files.update({ fileId, media: { mimeType: "application/json", body: readableStream } });
+  await drive.files.update({
+    fileId,
+    media: { mimeType: "application/json", body: Readable.from(JSON.stringify(stateData, null, 2)) },
+  });
 }
 
 async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
@@ -499,10 +680,7 @@ async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [rowValues] },
   });
-
-  const updatedRange = appendRes.data.updates.updatedRange;
-  const rowNumber = parseInt(updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
-
+  const rowNumber = parseInt(appendRes.data.updates.updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
