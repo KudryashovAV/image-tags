@@ -7,7 +7,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
 
-// БУЛЛЕТПРУФ АВТОРИЗАЦИЯ
+// БУЛЛЕТПРУФ АВТОРИЗАЦИЯ GOOGLE
 async function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
   oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
@@ -43,35 +43,49 @@ function columnToLetter(column) {
   return letter || "A";
 }
 
-// Вспомогательная функция отправки ответов через response_url Slack
-async function sendSlackResponseUrl(url, text) {
-  if (!url) return;
+// НАДЁЖНАЯ ФУНКЦИЯ ДЛЯ СВЯЗИ СО SLACK (Возвращает TS сообщения для создания треда)
+async function sendSlackMessage(token, channel, text, threadTs = null) {
+  if (!token || !channel) return null;
   try {
-    await fetch(url, {
+    const body = { channel, text };
+    if (threadTs) body.thread_ts = threadTs; // Если передан родительский TS — сообщение уйдет в тред
+
+    const res = await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ response_type: "in_channel", text: text }),
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
     });
+
+    const data = await res.json();
+    if (!data.ok) {
+      console.error("[Slack API Error]:", data.error);
+      return null;
+    }
+    return data.ts; // Возвращаем timestamp созданного сообщения
   } catch (e) {
-    console.error("[Slack API Error response_url]:", e.message);
+    console.error("[Slack Fetch Error]:", e.message);
+    return null;
   }
 }
 
 // ========================================================
-// ГЛАВНЫЙ ЭНДПОИНТ: Срабатывает за 10мс, защищен от таймаутов
+// ГЛАВНЫЙ ЭНДПОИНТ: Принимает задачу и мгновенно отвечает
 // ========================================================
 export async function POST(request) {
   try {
     const contentType = request.headers.get("content-type") || "";
     let spreadsheetId = null;
-    let responseUrl = null;
+    let channelId = null;
     let isSlack = false;
 
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
-      responseUrl = formData.get("response_url")?.toString() || null;
+      channelId = formData.get("channel_id")?.toString() || null; // Вытаскиваем ID канала, откуда пришла команда
 
       spreadsheetId = slackText.split(" ")[0];
 
@@ -90,15 +104,14 @@ export async function POST(request) {
       return NextResponse.json({ error: "Missing spreadsheetId" }, { status: 400 });
     }
 
-    // ТРИГГЕР: Отправляем тяжелую задачу в фон БЕЗ await.
-    // Скрипт пролетает дальше, не дожидаясь ответов от Google дисков
-    backgroundProcessor(spreadsheetId, responseUrl);
+    // ТРИГГЕР: Выстреливаем тяжелый воркер в фон
+    backgroundProcessor(spreadsheetId, channelId);
 
-    // Моментальный публичный ответ для Slack (укладываемся в лимит 3 сек)
+    // Моментальный ответ Slack-серверу (выдаем ephemeral, чтобы подтвердить получение)
     if (isSlack) {
       return NextResponse.json({
-        response_type: "in_channel",
-        text: `⏳ *Запрос на генерацию принят!* Разворачиваю фонового ИИ-воркера.\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n Начинаю проверку структуры таблиц и создание папок на Google Диске. Финальный отчет придет сюда по готовности...`,
+        response_type: "ephemeral",
+        text: `⏳ *Запрос принят!* Бот начинает публикацию сессии в канал...`,
       });
     }
 
@@ -108,12 +121,6 @@ export async function POST(request) {
     });
   } catch (error) {
     console.error("Main generation endpoint error:", error);
-    if (request.headers.get("content-type")?.includes("application/x-www-form-urlencoded")) {
-      return NextResponse.json({
-        response_type: "in_channel",
-        text: `❌ *Критическая ошибка запуска:* \`${error.message}\``,
-      });
-    }
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
@@ -125,13 +132,27 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// АСИНХРОННЫЙ ФОНОВЫЙ ВОРКЕР: Тянет всю логику подготовки и работы
+// АСИНХРОННЫЙ ФОНОВЫЙ ВОРКЕР: Ведет генерацию строго внутри треда
 // ========================================================
-async function backgroundProcessor(spreadsheetId, responseUrl) {
+async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
 
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  let rootThreadTs = null;
+
+  // ШАГ 0: Создаем корневое сообщение в общем канале и фиксируем его Timestamp
+  if (slackToken && channelId) {
+    rootThreadTs = await sendSlackMessage(
+      slackToken,
+      channelId,
+      `🚀 *Запуск массовой High-Res генерации изображения!*\n` +
+        `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
+        `🛠️ Начинаю авторизацию и развертывание файловой структуры на Google Диске...`,
+    );
+  }
+
   try {
-    // Шаг 1. Авторизация и сбор данных таблицы (теперь внутри воркера)
+    // Шаг 1. Авторизация и сбор данных таблицы
     const { drive, sheets } = await getGoogleAuth();
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
 
@@ -147,22 +168,24 @@ async function backgroundProcessor(spreadsheetId, responseUrl) {
     const rows = sheetData.data.values || [];
 
     if (rows.length <= 1) {
-      if (responseUrl)
-        await sendSlackResponseUrl(
-          responseUrl,
-          `❌ *Ошибка отмены:* Указанная таблица-донор \`${spreadsheetId}\` пуста.`,
-        );
+      await sendSlackMessage(
+        slackToken,
+        channelId,
+        `❌ *Ошибка отмены:* Указанная таблица-донор \`${spreadsheetId}\` пуста.`,
+        rootThreadTs,
+      );
       return;
     }
 
     const header = rows[0];
     const promptColIndex = header.findIndex((h) => h.trim() === "Промт для воссоздания");
     if (promptColIndex === -1) {
-      if (responseUrl)
-        await sendSlackResponseUrl(
-          responseUrl,
-          `❌ *Ошибка отмены:* Колонка "Промт для воссоздания" не найдена в таблице \`${spreadsheetId}\`.`,
-        );
+      await sendSlackMessage(
+        slackToken,
+        channelId,
+        `❌ *Ошибка отмены:* Колонка "Промт для воссоздания" не найдена в таблице \`${spreadsheetId}\`.`,
+        rootThreadTs,
+      );
       return;
     }
     const promptColLetter = columnToLetter(promptColIndex + 1);
@@ -294,13 +317,13 @@ async function backgroundProcessor(spreadsheetId, responseUrl) {
       stateFileId = createState.data.id;
     }
 
-    // Информируем канал о том, что подготовка успешно завершена и пошла прямая отрисовка картинок ИИ
-    if (responseUrl) {
-      await sendSlackResponseUrl(
-        responseUrl,
-        `⚙️ *Подготовка завершена:* Задачи распределены. Всего промптов в работе: *${stateData.totalCount}*.\n📂 *Рабочий архив на сессию:* ${dateFolderUrl}\n🛸 Начинаю поочередный рендеринг через gpt-image-2 и Imagen 4 Ultra...`,
-      );
-    }
+    // ОТПРАВЛЯЕМ ОБНОВЛЕНИЕ СТАТУСА В ТРЕД (Передаем rootThreadTs)
+    await sendSlackMessage(
+      slackToken,
+      channelId,
+      `⚙️ *Структура развернута:* Промптов найдено в доноре: *${stateData.totalCount}*.\n📂 *Рабочий архив Диска:* ${dateFolderUrl}\n🛸 Включаю нейросети, начинаю рендеринг картинок...`,
+      rootThreadTs,
+    );
 
     // Шаг 3. Исполнение очереди задач
     const taskIds = Object.keys(stateData.progress);
@@ -394,22 +417,19 @@ async function backgroundProcessor(spreadsheetId, responseUrl) {
 
     console.log("[Background Worker] Все доступные задачи из очереди обработаны.");
 
-    // Шаг 4. Публикация итогового отчета
-    if (responseUrl) {
-      const finalSummaryText =
-        `🏁 *Массовая High-Res генерация успешно завершена!*\n\n` +
-        `📈 *Итоги сессии:*\n` +
-        `• Всего промптов обработано: *${stateData.totalCount}*\n` +
-        `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
-        `📂 Лог-таблицы и папки с png-оригиналами сохранены здесь:\n` +
-        `👉 *Ссылка на архив на Диске:* ${dateFolderUrl}`;
+    // Шаг 4. Финальный отчет строго ВНУТРЬ ТРЕДА
+    const finalSummaryText =
+      `🏁 *Массовая High-Res генерация успешно завершена!*\n\n` +
+      `📈 *Итоги сессии:*\n` +
+      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
+      `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `👉 *Ссылка на архив на Диске:* ${dateFolderUrl}`;
 
-      await sendSlackResponseUrl(responseUrl, finalSummaryText);
-    }
+    await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
     console.error("[Fatal Worker Error] Фоновый процесс полностью остановлен:", criticalWorkerError.message);
     const failMsg = `❌ *Критический сбой фонового воркера:* \`${criticalWorkerError.message}\``;
-    if (responseUrl) await sendSlackResponseUrl(responseUrl, failMsg);
+    await sendSlackMessage(slackToken, channelId, failMsg, rootThreadTs);
   }
 }
 
