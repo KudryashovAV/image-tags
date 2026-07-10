@@ -84,7 +84,6 @@ export async function POST(request) {
     let channelId = null;
     let isSlack = false;
 
-    // СЦЕНАРИЙ А: Запрос прилетел из Slack
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
@@ -102,20 +101,15 @@ export async function POST(request) {
       const firstWord = words[0].toLowerCase();
 
       if (firstWord === "gpt" || firstWord === "gemini") {
-        // Одиночный режим с явным указанием ИИ
         selectedModel = firstWord;
         singlePrompt = slackText.substring(slackText.indexOf(" ") + 1).trim();
       } else if (words.length > 1 || words[0].length < 35 || words[0].length > 50) {
-        // ИСПРАВЛЕНО: Если слов много ИЛИ первое слово не подходит под длину ID таблицы (44 символа)
-        // Значит, пользователь опустил название ИИ и сразу пишет промпт для обеих нейросетей!
         selectedModel = "both";
         singlePrompt = slackText;
       } else {
-        // Пакетный режим по таблице-донору
         spreadsheetId = words[0];
       }
     } else {
-      // СЦЕНАРИЙ Б: Обычный JSON запрос
       const body = await request.json();
       if (body.prompt) {
         singlePrompt = body.prompt;
@@ -125,7 +119,6 @@ export async function POST(request) {
       }
     }
 
-    // РАСПРЕДЕЛЕНИЕ ПОТОКОВ ВОРКЕРОВ
     if (singlePrompt) {
       backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
 
@@ -187,7 +180,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
   try {
     const { drive, sheets } = await getGoogleAuth();
 
-    // Находим или создаем общую таблицу "Лог одиночных генераций" строго в целевой папке
     const sheetCheck = await drive.files.list({
       q: `'${SINGLE_PROMPT_FOLDER_ID}' in parents and name = 'Лог одиночных генераций' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
       fields: "files(id)",
@@ -223,7 +215,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       rootThreadTs,
     );
 
-    // Определяем список моделей для запуска
     const modelsToRun = model === "both" ? ["gpt", "gemini"] : [model];
 
     for (const currentModel of modelsToRun) {
@@ -266,16 +257,13 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       }
 
       if (imageBase64) {
-        // Формируем безопасное файловое имя с названием модели и временем
         const now = new Date();
         const pad = (n) => String(n).padStart(2, "0");
         const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
         const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
 
-        // Загружаем готовый файл в фиксированную папку
         const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
 
-        // Логируем запись и применяем умные авто-размеры и авто-переносы слов
         const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, currentModel.toUpperCase()];
         await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
 
@@ -301,7 +289,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
   }
 }
 
-// ИСПРАВЛЕНО: Специфический функционал умного форматирования ячеек и автопереноса промпта
 async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
   const appendRes = await sheets.spreadsheets.values.append({
     spreadsheetId,
@@ -317,7 +304,6 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
     spreadsheetId,
     requestBody: {
       requests: [
-        // 1. Принудительная высота строки (250px) под картинку
         {
           updateDimensionProperties: {
             range: { sheetId: 0, dimension: "ROWS", startIndex: rowNumber - 1, endIndex: rowNumber },
@@ -325,7 +311,6 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
             fields: "pixelSize",
           },
         },
-        // 2. Ширина колонки Б под превью изображения (250px)
         {
           updateDimensionProperties: {
             range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
@@ -333,7 +318,6 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
             fields: "pixelSize",
           },
         },
-        // 3. АВТОПЕРЕНОС СЛОВ: Настройка ячейки промпта (Колонка C, индекс 2), чтобы текст не скрывался на листе
         {
           repeatCell: {
             range: {
@@ -347,7 +331,6 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
             fields: "userEnteredFormat.wrapStrategy",
           },
         },
-        // 4. АВТОШИРИНА КОЛОНКИ: Растягивает колонку C под самый длинный текст
         {
           autoResizeDimensions: {
             dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 },
@@ -633,6 +616,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
   }
 }
 
+// ========================================================
+// ИСПРАВЛЕНО: Добавлен параметр imageSize: "2K" в тело запроса
+// ========================================================
 async function generateImagen3(clientPrompt) {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "imagen-4.0-ultra-generate-001";
@@ -644,7 +630,12 @@ async function generateImagen3(clientPrompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       instances: [{ prompt: clientPrompt }],
-      parameters: { sampleCount: 1, aspectRatio: "9:16", outputMimeType: "image/png" },
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: "9:16",
+        imageSize: "2K", // Системный разгон разрешения до ~1536x2752
+        outputMimeType: "image/png",
+      },
     }),
   });
 
