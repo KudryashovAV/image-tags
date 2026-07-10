@@ -96,12 +96,10 @@ export async function POST(request) {
       if (!slackText) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: '❌ *Ошибка:* Пустой запрос. Используйте формат ключ="значение":\n• Пакетный режим: \`/generate table_id="ID_ТАБЛИЦЫ"\`\n• Одиночный режим: \`/generate prompt="Текст промпта" models="gpt, gemini3"\`',
+          text: '❌ *Ошибка:* Пустой запрос. Используйте формат ключ="значение":\n• Пакетный режим: \`/generate table_id=\"ID_ТАБЛИЦЫ\"\`\n• Одиночный режим: \`/generate prompt=\"Текст промпта\" models=\"gpt, gemini3\"\`',
         });
       }
 
-      // 🛠️ ИСПРАВЛЕНО: Новый парсер под формат key="value"
-      // Захватывает имя ключа и всё содержимое внутри кавычек, игнорируя пробелы вокруг знака "="
       const args = {};
       const argRegex = /([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"/g;
       let match;
@@ -112,15 +110,13 @@ export async function POST(request) {
         args[key] = value;
       }
 
-      // Если пользователь не передал валидных пар ключ="значение"
       if (Object.keys(args).length === 0) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: '❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках. Примеры:\n• \`/generate table_id="1YHFdKYs..."\`\n• \`/generate prompt="Сказочный лес" models="gpt, gemini3"\`',
+          text: '❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках. Примеры:\n• \`/generate table_id=\"1YHFdKYs...\"\`\n• \`/generate prompt=\"Сказочный лес\" models=\"gpt, gemini3\"\`',
         });
       }
 
-      // Распределяем значения из объекта аргументов
       spreadsheetId = args.table_id || null;
       singlePrompt = args.prompt || args.promt || null;
       selectedModel = args.models || "all";
@@ -134,7 +130,6 @@ export async function POST(request) {
       }
     }
 
-    // ВАЛИДАЦИЯ ЛОГИКИ ВЫПОЛНЕНИЯ
     if (singlePrompt) {
       backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
 
@@ -175,7 +170,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ДИНАМИЧЕСКИЙ МАССИВ)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -735,7 +730,14 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       }
     }
 
-    const finalSummaryText = `🏁 *Массовая тройная генерация завершена!*\n• Всего промптов: *${stateData.totalCount}*\n• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}`;
+    // ИСПРАВЛЕНО: Теперь формируем красивый отчет со встроенной ссылкой на веб-страницу сравнения с ID таблиц
+    const finalSummaryText =
+      `🏁 *Массовая тройная генерация успешно завершена!*\n` +
+      `• Всего промптов: *${stateData.totalCount}*\n` +
+      `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
+      `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
+// http://localhost:3000/compare?gpt=1RJnzyXdKQAxf6wKm_wb7Cd9GYhLAqWMC&ultra=1NWBUpjDJMufWkofAMW3TJut2YY6DDQaYhsJbUcgtixg&pro=1TTm2xITnwQPCEt_AnhfV_ronH14E7uET-OCFbP5MB-o
     await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
     await sendSlackMessage(
