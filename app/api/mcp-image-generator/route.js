@@ -452,11 +452,39 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     let stateFileId = null;
     let gptFolderId, geminiUltraFolderId, gemini3FolderId;
     let gptSheetId, geminiUltraSheetId, gemini3SheetId;
+    let isResuming = false;
 
+    // ИСПРАВЛЕНО: Умный поиск папки под конкретную таблицу (исключаем кеширование чужих сессий)
     if (existingFolderCheck.data.files && existingFolderCheck.data.files.length > 0) {
-      dateFolderId = existingFolderCheck.data.files[0].id;
-      dateFolderUrl = existingFolderCheck.data.files[0].webViewLink;
+      for (const folder of existingFolderCheck.data.files) {
+        const subfiles = await drive.files.list({
+          q: `'${folder.id}' in parents and name = 'state.json' and trashed = false`,
+          fields: "files(id)",
+        });
 
+        if (subfiles.data.files && subfiles.data.files.length > 0) {
+          const potentialStateId = subfiles.data.files[0].id;
+          try {
+            const response = await drive.files.get({ fileId: potentialStateId, alt: "media" });
+            const potentialState = response.data;
+
+            // Если сохранённый ID таблицы внутри state.json совпадает с текущим — продолжаем сессию
+            if (potentialState && potentialState.spreadsheetId === spreadsheetId) {
+              dateFolderId = folder.id;
+              dateFolderUrl = folder.webViewLink;
+              stateFileId = potentialStateId;
+              isResuming = true;
+              break;
+            }
+          } catch (e) {
+            console.error("[State Check Error]: Can't read state file, skipping folder.", e.message);
+          }
+        }
+      }
+    }
+
+    if (isResuming) {
+      // ИСПРАВЛЕНО: Восстанавливаем ID подпапок и таблиц строго для найденной сессии
       const subfolders = await drive.files.list({
         q: `'${dateFolderId}' in parents and trashed = false`,
         fields: "files(id, name)",
@@ -465,27 +493,28 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
         if (f.name === "gemini-3-pro-image") gemini3FolderId = f.id;
-        if (f.name === "state.json") stateFileId = f.id;
       });
 
-      const gptFiles = await drive.files.list({
-        q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-        fields: "files(id)",
-      });
-      gptSheetId = gptFiles.data.files[0]?.id;
-
-      const geminiUltraFiles = await drive.files.list({
-        q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-        fields: "files(id)",
-      });
-      geminiUltraSheetId = geminiUltraFiles.data.files[0]?.id;
-
-      const gemini3Files = await drive.files.list({
-        q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-        fields: "files(id)",
-      });
-      gemini3SheetId = gemini3Files.data.files[0]?.id;
+      gptSheetId = (
+        await drive.files.list({
+          q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+          fields: "files(id)",
+        })
+      ).data.files[0]?.id;
+      geminiUltraSheetId = (
+        await drive.files.list({
+          q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+          fields: "files(id)",
+        })
+      ).data.files[0]?.id;
+      gemini3SheetId = (
+        await drive.files.list({
+          q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+          fields: "files(id)",
+        })
+      ).data.files[0]?.id;
     } else {
+      // ИСПРАВЛЕНО: Если таблица новая, разворачиваем уникальную изолированную ветку каталогов
       const now = new Date();
       const timeStr = `${now.toLocaleDateString("ru-RU")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
@@ -730,14 +759,13 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       }
     }
 
-    // ИСПРАВЛЕНО: Теперь формируем красивый отчет со встроенной ссылкой на веб-страницу сравнения с ID таблиц
     const finalSummaryText =
       `🏁 *Массовая тройная генерация успешно завершена!*\n` +
       `• Всего промптов: *${stateData.totalCount}*\n` +
       `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
       `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
       `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
-// http://localhost:3000/compare?gpt=1RJnzyXdKQAxf6wKm_wb7Cd9GYhLAqWMC&ultra=1NWBUpjDJMufWkofAMW3TJut2YY6DDQaYhsJbUcgtixg&pro=1TTm2xITnwQPCEt_AnhfV_ronH14E7uET-OCFbP5MB-o
+
     await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
     await sendSlackMessage(
@@ -822,7 +850,7 @@ async function updateStateFile(drive, fileId, stateData) {
 async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
   const appendRes = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: "Лог!A:F",
+    range: "Log!A:F",
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [rowValues] },
   });
