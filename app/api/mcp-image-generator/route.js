@@ -378,7 +378,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ (ОПТИМИЗИРОВАН)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -454,7 +454,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     let gptSheetId, geminiUltraSheetId, gemini3SheetId;
     let isResuming = false;
 
-    // ИСПРАВЛЕНО: Умный поиск папки под конкретную таблицу (исключаем кеширование чужих сессий)
     if (existingFolderCheck.data.files && existingFolderCheck.data.files.length > 0) {
       for (const folder of existingFolderCheck.data.files) {
         const subfiles = await drive.files.list({
@@ -468,7 +467,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
             const response = await drive.files.get({ fileId: potentialStateId, alt: "media" });
             const potentialState = response.data;
 
-            // Если сохранённый ID таблицы внутри state.json совпадает с текущим — продолжаем сессию
             if (potentialState && potentialState.spreadsheetId === spreadsheetId) {
               dateFolderId = folder.id;
               dateFolderUrl = folder.webViewLink;
@@ -484,7 +482,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     }
 
     if (isResuming) {
-      // ИСПРАВЛЕНО: Восстанавливаем ID подпапок и таблиц строго для найденной сессии
       const subfolders = await drive.files.list({
         q: `'${dateFolderId}' in parents and trashed = false`,
         fields: "files(id, name)",
@@ -514,7 +511,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         })
       ).data.files[0]?.id;
     } else {
-      // ИСПРАВЛЕНО: Если таблица новая, разворачиваем уникальную изолированную ветку каталогов
       const now = new Date();
       const timeStr = `${now.toLocaleDateString("ru-RU")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
@@ -648,8 +644,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       if (task.status === "completed" || task.status === "failed") continue;
 
       try {
+        // ИСПРАВЛЕНО: Статус меняем в локальной памяти. Убрали промежуточную запись на Диск (МИНУС 1 запрос к лимитам)
         task.status = "processing";
-        await updateStateFile(drive, stateFileId, stateData);
 
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
 
@@ -750,13 +746,23 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
         task.status = "completed";
         stateData.completedCount++;
-        await updateStateFile(drive, stateFileId, stateData);
       } catch (lineError) {
+        console.error(`[Row Critical Error] Ошибка обработки строки ${id}:`, lineError.message);
         task.status = "failed";
+      }
+
+      // ИСПРАВЛЕНО: Синхронизируем стейт на Диске раз в 5 строк или на самом последнем элементе (МИНУС 90% трафика стейта)
+      const currentIdx = taskIds.indexOf(id) + 1;
+      if (currentIdx % 5 === 0 || currentIdx === taskIds.length) {
         try {
           await updateStateFile(drive, stateFileId, stateData);
-        } catch (e) {}
+        } catch (e) {
+          console.error("[State Throttling Error]: Временная задержка сохранения стейта на Диск.", e.message);
+        }
       }
+
+      // ИСПРАВЛЕНО: Тактовая пауза в 300мс, чтобы Google API успевал очищать лимиты подключений
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
     const finalSummaryText =
@@ -850,7 +856,7 @@ async function updateStateFile(drive, fileId, stateData) {
 async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
   const appendRes = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: "Log!A:F",
+    range: "Лог!A:F",
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [rowValues] },
   });
