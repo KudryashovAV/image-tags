@@ -76,15 +76,20 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
 }
 
 // ========================================================
-// УМНЫЕ ХЕЛПЕРЫ ДЛЯ АВТОМАТИЧЕСКОГО ОПРЕДЕЛЕНИЯ СООТНОШЕНИЯ СТОРОН
+// ИСПРАВЛЕНО: ХЕЛИПЕРЫ СТРОГО ВЕРТИКАЛЬНОЙ ОРИЕНТАЦИИ
 // ========================================================
 function parseAspectRatio(promptText) {
-  // Ищет упоминание пропорций вида 1:1, 16:9, 9:16, 4:3, 3:4 и т.д.
   const match = promptText.match(/\b(\d+):(\d+)\b/);
   if (match) {
-    return `${match[1]}:${match[2]}`;
+    let w = parseInt(match[1]);
+    let h = parseInt(match[2]);
+
+    // Если ширина больше высоты (горизонтальный кадр) — принудительно переворачиваем в вертикальный
+    if (w > h) [w, h] = [h, w];
+
+    return `${w}:${h}`;
   }
-  return "9:16"; // Дефолтный откат системы
+  return "9:16"; // Дефолтный вертикальный откат
 }
 
 function mapOpenAiSize(ratio) {
@@ -214,11 +219,14 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
     return;
   }
 
-  // Динамически вычисляем соотношение сторон для текущего промпта
   const detectedRatio = parseAspectRatio(prompt);
   const openaiTargetSize = mapOpenAiSize(detectedRatio);
-
   const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
+
+  // ТЕХНИЧЕСКИЕ ЯКОРЯ ДЛЯ СТРОГОЙ ГЕОМЕТРИИ И ПРЯМОГО ГОРИЗОНТА
+  const compositionAnchors =
+    ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
+  const enhancedPrompt = prompt + compositionAnchors;
 
   if (slackToken && channelId) {
     rootThreadTs = await sendSlackMessage(
@@ -226,7 +234,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       channelId,
       `🎨 *Запуск одиночной High-Res генерации изображения!*\n` +
         `• *Выбранный стек ИИ:* \`${modelLabel}\`\n` +
-        `• *Формат кадра:* \`${detectedRatio}\` (${currentModel === "gpt" ? openaiTargetSize : "2K Ultra"})\n` +
+        `• *Формат кадра:* \`${detectedRatio}\` (Строгая вертикаль)\n` +
         `• *Промт:* \`${prompt}\`\n` +
         `🛠 ...Связываюсь со структурами логов на Диске...`,
     );
@@ -274,7 +282,9 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       let imageBase64 = null;
       let durationStr = "Ошибка";
       let modelNameTag = "ОШИБКА";
-      const strictPrompt = `Use the provided prompt verbatim without any modifications: ${prompt}`;
+
+      // OpenAI получает усиленный промпт внутри своей сервисной обертки
+      const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
       if (currentModel === "gpt") {
         modelNameTag = "GPT-IMAGE-2";
@@ -283,7 +293,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: openaiTargetSize, // Применяем динамическое разрешение
+            size: openaiTargetSize,
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -302,7 +312,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         modelNameTag = "IMAGEN 4 ULTRA";
         const startTime = performance.now();
         try {
-          imageBase64 = await generateImagen3(prompt, detectedRatio); // Передаем динамические пропорции
+          imageBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
           const endTime = performance.now();
           durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
@@ -314,7 +324,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         modelNameTag = "GEMINI 3 PRO IMAGE";
         const startTime = performance.now();
         try {
-          imageBase64 = await generateGemini3ProImage(prompt, detectedRatio); // Передаем динамические пропорции
+          imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
           const endTime = performance.now();
           durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
@@ -332,6 +342,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
         const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
 
+        // Логируем исходный prompt без технических служебных хвостов
         const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
         await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
 
@@ -406,7 +417,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ДИНАМИЧЕСКОЕ РАТИО)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (СТРОГАЯ ВЕРТИКАЛЬ)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -676,11 +687,15 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       try {
         task.status = "processing";
 
-        // Построчно вычисляем соотношение сторон из текущего промпта ячейки таблицы
         const detectedRatio = parseAspectRatio(task.prompt);
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
 
-        const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
+        // КЛИНИЧЕСКИЕ АНТИ-ТИЛТ И КОМПОЗИЦИОННЫЕ ЯКОРЯ ДЛЯ НЕЙРОСЕТИ
+        const compositionAnchors =
+          ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
+        const enhancedPrompt = task.prompt + compositionAnchors;
+
+        const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
         // --- 1. OpenAI gpt-image-2 ---
         let gptFileUrl = "Ошибка";
@@ -690,7 +705,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: openaiTargetSize, // Применяем динамическое разрешение
+            size: openaiTargetSize,
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -703,6 +718,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           if (gptBase64) {
             gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
+            // Сохраняем в таблицу исходный task.prompt без служебного хвоста
             const gptRow = [
               task.cellUrl,
               `=IMAGE("${gptFileUrl}")`,
@@ -723,7 +739,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         let geminiDurationStr = "Ошибка";
         try {
           const geminiStartTime = performance.now();
-          const imagenBase64 = await generateImagen3(task.prompt, detectedRatio); // Передаем динамические пропорции
+          const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
           const geminiEndTime = performance.now();
           geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
 
@@ -754,7 +770,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         let gemini3DurationStr = "Ошибка";
         try {
           const gemini3StartTime = performance.now();
-          const gemini3Base64 = await generateGemini3ProImage(task.prompt, detectedRatio); // Передаем динамические пропорции
+          const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
           const gemini3EndTime = performance.now();
           gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
@@ -829,7 +845,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 }
 
 // ========================================================
-// НОВЫЕ ХЕРАЛДИЧЕСКИЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
 // ========================================================
 async function appendRowOnly(sheets, spreadsheetId, rowValues) {
   await sheets.spreadsheets.values.append({
@@ -880,7 +896,7 @@ async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
       instances: [{ prompt: clientPrompt }],
       parameters: {
         sampleCount: 1,
-        aspectRatio: aspectRatio, // Динамические пропорции кадра
+        aspectRatio: aspectRatio,
         imageSize: "2K",
         outputMimeType: "image/png",
       },
@@ -907,7 +923,7 @@ async function generateGemini3ProImage(clientPrompt, aspectRatio = "9:16") {
       contents: [{ parts: [{ text: clientPrompt }] }],
       generationConfig: {
         imageConfig: {
-          aspectRatio: aspectRatio, // Динамические пропорции кадра
+          aspectRatio: aspectRatio,
           imageSize: "2K",
         },
       },
