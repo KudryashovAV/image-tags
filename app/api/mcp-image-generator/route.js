@@ -643,8 +643,10 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       const task = stateData.progress[id];
       if (task.status === "completed" || task.status === "failed") continue;
 
+      // ИСПРАВЛЕНО: Флаг для отслеживания реального успеха хотя бы одной модели в текущей строке
+      let rowSucceeded = false;
+
       try {
-        // ИСПРАВЛЕНО: Статус меняем в локальной памяти. Убрали промежуточную запись на Диск (МИНУС 1 запрос к лимитам)
         task.status = "processing";
 
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
@@ -678,7 +680,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               "GPT-IMAGE-2",
               task.prompt,
             ];
-            await appendRowAndResize(sheets, gptSheetId, gptRow);
+            await appendRowOnly(sheets, gptSheetId, gptRow);
+            rowSucceeded = true;
           }
         } catch (e) {
           console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
@@ -708,7 +711,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               "IMAGEN 4 ULTRA",
               task.prompt,
             ];
-            await appendRowAndResize(sheets, geminiUltraSheetId, geminiRow);
+            await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+            rowSucceeded = true;
           }
         } catch (e) {
           console.error(`[Imagen Ultra Error] Строка ${id}:`, e.message);
@@ -738,20 +742,26 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               "GEMINI 3 PRO IMAGE",
               task.prompt,
             ];
-            await appendRowAndResize(sheets, gemini3SheetId, gemini3Row);
+            await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+            rowSucceeded = true;
           }
         } catch (e) {
           console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
         }
 
-        task.status = "completed";
-        stateData.completedCount++;
+        // ИСПРАВЛЕНО: Маркируем статус строки на основе РЕАЛЬНОГО выполнения
+        if (rowSucceeded) {
+          task.status = "completed";
+          stateData.completedCount++;
+        } else {
+          task.status = "failed";
+        }
       } catch (lineError) {
         console.error(`[Row Critical Error] Ошибка обработки строки ${id}:`, lineError.message);
         task.status = "failed";
       }
 
-      // ИСПРАВЛЕНО: Синхронизируем стейт на Диске раз в 5 строк или на самом последнем элементе (МИНУС 90% трафика стейта)
+      // Синхронизируем стейт на Диске раз в 5 строк или на самом последнем элементе
       const currentIdx = taskIds.indexOf(id) + 1;
       if (currentIdx % 5 === 0 || currentIdx === taskIds.length) {
         try {
@@ -761,14 +771,22 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         }
       }
 
-      // ИСПРАВЛЕНО: Тактовая пауза в 300мс, чтобы Google API успевал очищать лимиты подключений
+      // Тактовая пауза в 300мс, чтобы Google API успевал очищать лимиты подключений
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
+    // ИСПРАВЛЕНО: Применяем глобальную стилизацию таблиц ЕДИНОЖДЫ в самом финале воркера (МИНУС 500+ лишних API вызовов)
+    console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию интерфейсов таблиц...");
+    await Promise.all([
+      finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
+      finalizeSheetStyle(sheets, geminiUltraSheetId, stateData.totalCount),
+      finalizeSheetStyle(sheets, gemini3SheetId, stateData.totalCount),
+    ]).catch((e) => console.error("[Styling Finalize Error]:", e.message));
+
     const finalSummaryText =
-      `🏁 *Массовая тройная генерация успешно завершена!*\n` +
-      `• Всего промптов: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `🏁 *Массовая тройная генерация завершена!*\n` +
+      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
+      `• Успешно закрыто строк с изображениями: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
       `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
       `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
 
@@ -781,6 +799,45 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       rootThreadTs,
     );
   }
+}
+
+// ========================================================
+// НОВЫЕ ХЕРАЛДИЧЕСКИЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
+// ========================================================
+
+// Легкий аппенд: только добавляет сырые данные, не дергая batchUpdate стилей
+async function appendRowOnly(sheets, spreadsheetId, rowValues) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "Лог!A:F",
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [rowValues] },
+  });
+}
+
+// Финальный тяжелый стайлер: вызывается ОДИН раз для всей таблицы целиком
+async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateDimensionProperties: {
+            range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: totalRows + 1 },
+            properties: { pixelSize: 250 },
+            fields: "pixelSize",
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+            properties: { pixelSize: 250 },
+            fields: "pixelSize",
+          },
+        },
+      ],
+    },
+  });
 }
 
 // ========================================================
@@ -850,36 +907,5 @@ async function updateStateFile(drive, fileId, stateData) {
   await drive.files.update({
     fileId,
     media: { mimeType: "application/json", body: Readable.from(JSON.stringify(stateData, null, 2)) },
-  });
-}
-
-async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
-  const appendRes = await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: "Лог!A:F",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [rowValues] },
-  });
-  const rowNumber = parseInt(appendRes.data.updates.updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "ROWS", startIndex: rowNumber - 1, endIndex: rowNumber },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
-          },
-        },
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
-          },
-        },
-      ],
-    },
   });
 }
