@@ -83,13 +83,10 @@ function parseAspectRatio(promptText) {
   if (match) {
     let w = parseInt(match[1]);
     let h = parseInt(match[2]);
-
-    // Принудительная вертикаль
-    if (w > h) [w, h] = [h, w];
-
+    if (w > h) [w, h] = [h, w]; // Принудительная вертикаль
     return `${w}:${h}`;
   }
-  return "9:16"; // Дефолтный вертикальный откат
+  return "9:16";
 }
 
 function mapOpenAiSize(ratio) {
@@ -198,7 +195,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (С 3-КРАТНЫМ ПОВТОРОМ)
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -221,7 +218,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
   const detectedRatio = parseAspectRatio(prompt);
   const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
-
   const compositionAnchors =
     ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
   const enhancedPrompt = prompt.trim() + compositionAnchors;
@@ -281,64 +277,70 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         let imageBase64 = null;
         let durationStr = "Ошибка";
         let modelNameTag = "ОШИБКА";
+        let isSuccess = false;
+        let lastErrorMsg = "";
 
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        if (currentModel === "gpt") {
-          modelNameTag = "GPT-IMAGE-2";
-          const startTime = performance.now();
+        // ЦИКЛ НА 3 ПОПЫТКИ
+        for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            const dallEApiResponse = await openai.images.generate({
-              model: "gpt-image-2",
-              prompt: strictPrompt,
-              size: openaiTargetSize,
-              quality: "high",
-              timeout: 60000, // Явный таймаут для OpenAI
-            });
-            const imageData = dallEApiResponse?.data?.[0];
+            if (currentModel === "gpt") {
+              modelNameTag = "GPT-IMAGE-2";
+              const startTime = performance.now();
+              const dallEApiResponse = await openai.images.generate({
+                model: "gpt-image-2",
+                prompt: strictPrompt,
+                size: openaiTargetSize,
+                quality: "high",
+                timeout: 60000,
+              });
+              const imageData = dallEApiResponse?.data?.[0];
 
-            if (imageData?.url) {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 30000);
-              const imgRes = await fetch(imageData.url, { signal: controller.signal });
-              clearTimeout(timeoutId);
-              imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
-            } else {
-              imageBase64 = imageData?.b64_json;
+              if (imageData?.url) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
+                const imgRes = await fetch(imageData.url, { signal: controller.signal });
+                clearTimeout(timeoutId);
+                imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+              } else {
+                imageBase64 = imageData?.b64_json;
+              }
+
+              durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
+              isSuccess = true;
+              break;
+            } else if (currentModel === "gemini") {
+              modelNameTag = "IMAGEN 4 ULTRA";
+              const startTime = performance.now();
+              imageBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
+              durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
+              isSuccess = true;
+              break;
+            } else if (currentModel === "gemini3") {
+              modelNameTag = "GEMINI 3 PRO IMAGE";
+              const startTime = performance.now();
+              imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
+              durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
+              isSuccess = true;
+              break;
             }
+          } catch (e) {
+            lastErrorMsg = e.message;
+            console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
+            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 2000)); // Пауза 2 сек перед повтором
+          }
+        }
 
-            const endTime = performance.now();
-            durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
-          } catch (e) {
-            console.error("[Single Worker GPT Error]:", e.message);
-            await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка GPT:* \`${e.message}\``, rootThreadTs);
-            return;
-          }
-        } else if (currentModel === "gemini") {
-          modelNameTag = "IMAGEN 4 ULTRA";
-          const startTime = performance.now();
-          try {
-            imageBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
-            const endTime = performance.now();
-            durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
-          } catch (e) {
-            console.error("[Single Worker Gemini Error]:", e.message);
-            await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini Ultra:* \`${e.message}\``, rootThreadTs);
-            return;
-          }
-        } else if (currentModel === "gemini3") {
-          modelNameTag = "GEMINI 3 PRO IMAGE";
-          const startTime = performance.now();
-          try {
-            imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
-            const endTime = performance.now();
-            durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
-          } catch (e) {
-            console.error("[Single Worker Gemini 3 Error]:", e.message);
-            await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini 3 Pro:* \`${e.message}\``, rootThreadTs);
-            return;
-          }
+        if (!isSuccess) {
+          await sendSlackMessage(
+            slackToken,
+            channelId,
+            `⚠️ *Ошибка ${modelNameTag}:* \`${lastErrorMsg}\` (3 неудачные попытки подряд)`,
+            rootThreadTs,
+          );
+          return;
         }
 
         if (imageBase64) {
@@ -348,15 +350,10 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
 
           const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
-
           const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
           await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
 
-          const intermediateMsg =
-            `✅ *Генерация через ${modelNameTag} завершена!*\n` +
-            `• Время рендеринга: *${durationStr}*\n` +
-            `👉 *Ссылка на High-Res:* ${fileUrl}`;
-
+          const intermediateMsg = `✅ *Генерация через ${modelNameTag} завершена!*\n• Время рендеринга: *${durationStr}*\n👉 *Ссылка на High-Res:* ${fileUrl}`;
           await sendSlackMessage(slackToken, channelId, intermediateMsg, rootThreadTs);
         }
       }),
@@ -382,7 +379,6 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [rowValues] },
   });
-
   const updatedRange = appendRes.data.updates.updatedRange;
   const rowNumber = parseInt(updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
 
@@ -424,7 +420,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (С 3-КРАТНЫМ ПОВТОРОМ)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -435,9 +431,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
-      `🚀 *Запуск массовой High-Res генерации изображений по списку (3 параллельных потока ИИ)!*\n` +
-        `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
-        `🛠️ Разворачиваю тройную структуру каталогов на Google Диске...`,
+      `🚀 *Запуск массовой High-Res генерации изображений по списку (3 параллельных потока ИИ)!*\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n🛠️ Разворачиваю тройную структуру каталогов на Google Диске...`,
     );
   }
 
@@ -659,7 +653,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" })).data;
     } else {
       tasks.forEach((t) => {
-        // ДОБАВЛЕНО: Расширенная структура логов с датами и массивом ошибок
         stateData.progress[t.id] = {
           status: "pending",
           prompt: t.prompt,
@@ -689,11 +682,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
     for (const id of taskIds) {
       const task = stateData.progress[id];
-      // ДОБАВЛЕНО: Безопасный рестарт. Если скрипт упал на 'processing' или 'failed', он попробует снова.
       if (task.status === "completed") continue;
 
       try {
-        // 1. ФИКСАЦИЯ СТАРТА
         task.status = "processing";
         task.startedAt = new Date().toISOString();
         task.errors = [];
@@ -706,117 +697,141 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         const enhancedPrompt = task.prompt.trim() + compositionAnchors;
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        // 2. ПАРАЛЛЕЛЬНЫЕ ПОТОКИ С ПЕРЕХВАТОМ ОШИБОК
         const results = await Promise.all([
           // Поток 1: OpenAI gpt-image-2
           (async () => {
-            try {
-              const gptStartTime = performance.now();
-              const dallEApiResponse = await openai.images.generate({
-                model: "gpt-image-2",
-                prompt: strictPrompt,
-                size: openaiTargetSize,
-                quality: "high",
-                timeout: 60000,
-              });
-              const imageData = dallEApiResponse?.data?.[0];
-              let gptBase64;
+            let lastError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const gptStartTime = performance.now();
+                const dallEApiResponse = await openai.images.generate({
+                  model: "gpt-image-2",
+                  prompt: strictPrompt,
+                  size: openaiTargetSize,
+                  quality: "high",
+                  timeout: 60000,
+                });
+                const imageData = dallEApiResponse?.data?.[0];
+                let gptBase64;
 
-              if (imageData?.url) {
-                // ДОБАВЛЕНО: Таймаут на скачивание картинки
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000);
-                const imgRes = await fetch(imageData.url, { signal: controller.signal });
-                clearTimeout(timeoutId);
-                gptBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
-              } else {
-                gptBase64 = imageData?.b64_json;
-              }
+                if (imageData?.url) {
+                  const controller = new AbortController();
+                  const timeoutId = setTimeout(() => controller.abort(), 30000);
+                  const imgRes = await fetch(imageData.url, { signal: controller.signal });
+                  clearTimeout(timeoutId);
+                  gptBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+                } else {
+                  gptBase64 = imageData?.b64_json;
+                }
 
-              const gptDurationStr = `${((performance.now() - gptStartTime) / 1000).toFixed(2)} сек`;
-              if (gptBase64) {
-                const gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
-                const gptRow = [
-                  task.cellUrl,
-                  `=IMAGE("${gptFileUrl}")`,
-                  gptFileUrl,
-                  gptDurationStr,
-                  "GPT-IMAGE-2",
-                  task.prompt,
-                ];
-                await appendRowOnly(sheets, gptSheetId, gptRow);
-                return { success: true };
+                const gptDurationStr = `${((performance.now() - gptStartTime) / 1000).toFixed(2)} сек`;
+                if (gptBase64) {
+                  const gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
+                  const gptRow = [
+                    task.cellUrl,
+                    `=IMAGE("${gptFileUrl}")`,
+                    gptFileUrl,
+                    gptDurationStr,
+                    "GPT-IMAGE-2",
+                    task.prompt,
+                  ];
+                  await appendRowOnly(sheets, gptSheetId, gptRow);
+                  return { success: true };
+                }
+                throw new Error("No image data returned from OpenAI");
+              } catch (e) {
+                lastError = e;
+                console.error(`[GPT-Image Строка ${id} | Попытка ${attempt}]:`, e.message);
+                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000)); // Ждем 2 сек и повторяем
               }
-              throw new Error("No image data returned from OpenAI");
-            } catch (e) {
-              return { success: false, error: `GPT-Image-2: ${e.message}` };
             }
+            return {
+              success: false,
+              error: `GPT-Image-2: ${lastError?.message || "Неизвестная ошибка"} (после 3 попыток)`,
+            };
           })(),
 
           // Поток 2: GEMINI IMAGEN 4 ULTRA
           (async () => {
-            try {
-              const geminiStartTime = performance.now();
-              const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
-              const geminiDurationStr = `${((performance.now() - geminiStartTime) / 1000).toFixed(2)} сек`;
+            let lastError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const geminiStartTime = performance.now();
+                const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
+                const geminiDurationStr = `${((performance.now() - geminiStartTime) / 1000).toFixed(2)} сек`;
 
-              if (imagenBase64) {
-                const geminiFileUrl = await uploadBase64ToDrive(
-                  drive,
-                  imagenBase64,
-                  `gemini_ultra_art_${id}.png`,
-                  geminiUltraFolderId,
-                );
-                const geminiRow = [
-                  task.cellUrl,
-                  `=IMAGE("${geminiFileUrl}")`,
-                  geminiFileUrl,
-                  geminiDurationStr,
-                  "IMAGEN 4 ULTRA",
-                  task.prompt,
-                ];
-                await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
-                return { success: true };
+                if (imagenBase64) {
+                  const geminiFileUrl = await uploadBase64ToDrive(
+                    drive,
+                    imagenBase64,
+                    `gemini_ultra_art_${id}.png`,
+                    geminiUltraFolderId,
+                  );
+                  const geminiRow = [
+                    task.cellUrl,
+                    `=IMAGE("${geminiFileUrl}")`,
+                    geminiFileUrl,
+                    geminiDurationStr,
+                    "IMAGEN 4 ULTRA",
+                    task.prompt,
+                  ];
+                  await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+                  return { success: true };
+                }
+                throw new Error("No bytes returned from Imagen Ultra");
+              } catch (e) {
+                lastError = e;
+                console.error(`[Imagen Ultra Строка ${id} | Попытка ${attempt}]:`, e.message);
+                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
               }
-              throw new Error("No bytes returned from Imagen Ultra");
-            } catch (e) {
-              return { success: false, error: `Imagen-Ultra: ${e.message}` };
             }
+            return {
+              success: false,
+              error: `Imagen-Ultra: ${lastError?.message || "Неизвестная ошибка"} (после 3 попыток)`,
+            };
           })(),
 
           // Поток 3: GEMINI 3 PRO IMAGE
           (async () => {
-            try {
-              const gemini3StartTime = performance.now();
-              const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
-              const gemini3DurationStr = `${((performance.now() - gemini3StartTime) / 1000).toFixed(2)} сек`;
+            let lastError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const gemini3StartTime = performance.now();
+                const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
+                const gemini3DurationStr = `${((performance.now() - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
-              if (gemini3Base64) {
-                const gemini3FileUrl = await uploadBase64ToDrive(
-                  drive,
-                  gemini3Base64,
-                  `gemini3_pro_art_${id}.png`,
-                  gemini3FolderId,
-                );
-                const gemini3Row = [
-                  task.cellUrl,
-                  `=IMAGE("${gemini3FileUrl}")`,
-                  gemini3FileUrl,
-                  gemini3DurationStr,
-                  "GEMINI 3 PRO IMAGE",
-                  task.prompt,
-                ];
-                await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
-                return { success: true };
+                if (gemini3Base64) {
+                  const gemini3FileUrl = await uploadBase64ToDrive(
+                    drive,
+                    gemini3Base64,
+                    `gemini3_pro_art_${id}.png`,
+                    gemini3FolderId,
+                  );
+                  const gemini3Row = [
+                    task.cellUrl,
+                    `=IMAGE("${gemini3FileUrl}")`,
+                    gemini3FileUrl,
+                    gemini3DurationStr,
+                    "GEMINI 3 PRO IMAGE",
+                    task.prompt,
+                  ];
+                  await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+                  return { success: true };
+                }
+                throw new Error("No bytes returned from Gemini 3 Pro");
+              } catch (e) {
+                lastError = e;
+                console.error(`[Gemini 3 Pro Строка ${id} | Попытка ${attempt}]:`, e.message);
+                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
               }
-              throw new Error("No bytes returned from Gemini 3 Pro");
-            } catch (e) {
-              return { success: false, error: `Gemini-3-Pro: ${e.message}` };
             }
+            return {
+              success: false,
+              error: `Gemini-3-Pro: ${lastError?.message || "Неизвестная ошибка"} (после 3 попыток)`,
+            };
           })(),
         ]);
 
-        // 3. АНАЛИЗ РЕЗУЛЬТАТОВ ПОТОКОВ
         let rowSucceeded = false;
         task.errors = [];
 
@@ -840,14 +855,14 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         task.errors.push(`Critical Exception: ${lineError.message}`);
       }
 
-      // 4. ФИКСАЦИЯ РЕЗУЛЬТАТА: Теперь сохраняем стейт в Google Drive после каждой строки
+      // Сохраняем стейт в Google Drive после каждой строки для 100% контроля
       try {
         await updateStateFile(drive, stateFileId, stateData);
       } catch (e) {
         console.error("[State Saving Error]:", e.message);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 500)); // Пауза передышки
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
     console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию...");
@@ -926,7 +941,7 @@ async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана");
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд жесткий таймаут
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
 
   try {
     const response = await fetch(
@@ -960,7 +975,7 @@ async function generateGemini3ProImage(clientPrompt, aspectRatio = "9:16") {
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана");
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд жесткий таймаут
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
 
   try {
     const response = await fetch(
