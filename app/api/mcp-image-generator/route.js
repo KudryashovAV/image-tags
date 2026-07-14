@@ -344,19 +344,8 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
 
-  // ИСПРАВЛЕНО: Парсинг моделей перенесен в безопасное место, где аргумент model гарантированно существует
-  let modelsToRun = model === "all" ? [...KNOWN_MODELS] : model.split(",").map((m) => m.trim().toLowerCase());
-  modelsToRun = modelsToRun.filter((m) => KNOWN_MODELS.includes(m));
-
-  if (slackToken && channelId) {
-    rootThreadTs = await sendSlackMessage(
-      slackToken,
-      channelId,
-      `🚀 *Запуск массовой High-Res генерации изображений по списку (${modelsToRun.toUpperCase().join(" + ")})!*\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n🛠️ Разворачиваю каталоги структур...`,
-    );
-  }
-
-  let cloudLogBuffer = `=== СТАРТ СЕССИИ АНАЛИЗА КАНАЛА: ${new Date().toLocaleString("ru-RU")} ===\n`;
+  // Инициализация локального буфера логирования
+  let cloudLogBuffer = `=== СТАРТ СЕССИИ ГЕНЕРАЦИИ: ${new Date().toLocaleString("ru-RU")} ===\n`;
   let logFileId = null;
   let driveInstance = null;
 
@@ -368,11 +357,13 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
 
     if (driveInstance && logFileId) {
       try {
-        await driveInstance.files.update({
-          fileId: logFileId,
-          media: { mimeType: "text/plain", body: Readable.from(cloudLogBuffer) },
-          timeout: 10000,
-        });
+        await driveInstance.files.update(
+          {
+            fileId: logFileId,
+            media: { mimeType: "text/plain", body: Readable.from(cloudLogBuffer) },
+          },
+          { timeout: 10000 },
+        );
       } catch (e) {
         console.error("Критический сбой записи logs.txt на Диск:", e.message);
       }
@@ -380,6 +371,27 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   };
 
   try {
+    // ВЕСЬ КОД ТЕПЕРЬ ВНУТРИ TRY-CATCH ДЛЯ 100% ПЕРЕХВАТА ОШИБОК
+    let modelsToRun = model === "all" ? [...KNOWN_MODELS] : model.split(",").map((m) => m.trim().toLowerCase());
+    modelsToRun = modelsToRun.filter((m) => KNOWN_MODELS.includes(m));
+
+    if (modelsToRun.length === 0) {
+      if (slackToken && channelId)
+        await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Не найдено валидных моделей.`);
+      return;
+    }
+
+    // ИСПРАВЛЕНО: Правильный вызов toUpperCase для массива
+    const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
+
+    if (slackToken && channelId) {
+      rootThreadTs = await sendSlackMessage(
+        slackToken,
+        channelId,
+        `🚀 *Запуск массовой High-Res генерации изображений по списку (${modelLabel})!*\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n🛠️ Разворачиваю каталоги структур...`,
+      );
+    }
+
     const { drive, sheets } = await getGoogleAuth();
     driveInstance = drive;
 
@@ -480,7 +492,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
             { timeout: 15000 },
           )
         ).data?.files?.[0]?.id;
-      // ИСПРАВЛЕНО: Удалено некорректное мусорное слово 'security' из строки запроса Google API
       if (geminiUltraFolderId)
         geminiUltraSheetId = (
           await drive.files.list(
@@ -650,15 +661,7 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
       logFileId = createdLogFile.data.id;
     }
 
-    await log(`Успешное подключение. Найдено задач: ${tasks.length}. Режим возобновления: ${isResuming}`);
-
-    if (slackToken && channelId) {
-      rootThreadTs = await sendSlackMessage(
-        slackToken,
-        channelId,
-        `⚙ *Конвейер развернут.* Логи сессии пишутся в Диск.\n📂 *Файл логов:* См. \`logs.txt\` в рабочей папке.`,
-      );
-    }
+    await log(`Успешное подключение. Задач найдено: ${tasks.length}. Режим возобновления: ${isResuming}`);
 
     let stateData = { spreadsheetId, progress: {}, completedCount: 0, totalCount: tasks.length };
 
@@ -728,7 +731,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
 
         await log(`Промпт: "${task.prompt}". Формат кадра: ${detectedRatio}`);
 
-        // ИСПРАВЛЕНО: Потоки теперь инициализируются динамически на основе массива "modelsToRun"
         const promises = [];
 
         if (modelsToRun.includes("gpt")) {
@@ -935,8 +937,27 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
     }
 
     await log("=== КОНВЕЙЕР ПОЛНОСТЬЮ ЗАВЕРШЕН ===");
+
+    // ФИНАЛЬНОЕ СООБЩЕНИЕ ОБ УСПЕХЕ В SLACK
+    const finalSummaryText =
+      `🏁 *Массовая тройная генерация завершена!*\n` +
+      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
+      `• Успешно закрыто строк с полным пакетом изображений: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
+      `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
+
+    await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
+    // ТЕПЕРЬ ОШИБКА ПЕРЕХВАТЫВАЕТСЯ И ОТПРАВЛЯЕТСЯ В СЛАК
     console.error("Глобальный краш воркера:", criticalWorkerError.message);
+    if (slackToken && channelId) {
+      await sendSlackMessage(
+        slackToken,
+        channelId,
+        `❌ *Критический сбой фонового процесса:* \n\`${criticalWorkerError.message}\``,
+        rootThreadTs,
+      );
+    }
   }
 }
 
