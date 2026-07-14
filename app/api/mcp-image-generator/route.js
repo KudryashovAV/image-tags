@@ -4,10 +4,7 @@ import OpenAI from "openai";
 import { Readable } from "stream";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 const SINGLE_PROMPT_FOLDER_ID = "1aCmvzt6Vbw4glrHE-1BwUFZThW775Odt";
-
-// ГЛОБАЛЬНЫЙ СПИСОК ИЗВЕСТНЫХ МОДЕЛЕЙ
 const KNOWN_MODELS = ["gpt", "gemini", "gemini3"];
 
 // БУЛЛЕТПРУФ АВТОРИЗАЦИЯ GOOGLE
@@ -74,9 +71,6 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
   }
 }
 
-// ========================================================
-// УМНЫЕ ХЕЛПЕРЫ ДЛЯ АВТОМАТИЧЕСКОГО ОПРЕДЕЛЕНИЯ СООТНОШЕНИЯ СТОРОН
-// ========================================================
 function parseAspectRatio(promptText) {
   const match = promptText.match(/\b(\d+):(\d+)\b/);
   if (match) {
@@ -100,7 +94,7 @@ function mapOpenAiSize(ratio) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (С УМНЫМ КВАТЕРНЫМ ПАРСЕРОМ)
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ
 // ========================================================
 export async function POST(request) {
   try {
@@ -125,13 +119,11 @@ export async function POST(request) {
       }
 
       const args = {};
-      // ИСПРАВЛЕНО: Регулярное выражение теперь поддерживает как прямые кавычки "", так и фигурные кавычки Slack “”, ””, ‘’, ’’
       const argRegex = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|“([^”]*)[”"“]|‘([^’]*)[’'‘]|(\S+))/g;
       let match;
 
       while ((match = argRegex.exec(slackText)) !== null) {
         const key = match[1].toLowerCase();
-        // Извлекаем значение из группы, которая реально сматчилась
         const value = (match[2] || match[3] || match[4] || match[5] || match[6] || "").trim();
         args[key] = value;
       }
@@ -139,7 +131,7 @@ export async function POST(request) {
       if (Object.keys(args).length === 0) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: '❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках. Примеры:\n• \`/generate table_id=\"1YHFdKYs...\"\`\n• \`/generate prompt=\"Сказочный лес\" models=\"gpt, gemini3\"\`',
+          text: "❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках.",
         });
       }
 
@@ -153,35 +145,30 @@ export async function POST(request) {
         selectedModel = body.model?.toLowerCase() || "all";
       } else {
         spreadsheetId = body.spreadsheetId;
+        selectedModel = body.model?.toLowerCase() || "all";
       }
     }
 
     if (singlePrompt) {
       backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
-
       if (isSlack) {
-        const displayLabel = selectedModel === "all" ? "ВСЕ МОДЕЛИ" : selectedModel.toUpperCase().replace(/,/g, " + ");
         return NextResponse.json({
           response_type: "ephemeral",
-          text: `⏳ *Запрос принят!* Стек моделей: \`${displayLabel}\`. Разворачиваю одиночный рендеринг в тред общего канала...`,
+          text: `⏳ *Запрос принят!* Запускаю одиночный параллельный рендеринг...`,
         });
       }
       return NextResponse.json({ success: true, message: `Фоновый процесс одиночной генерации запущен.` });
     } else if (spreadsheetId) {
-      backgroundProcessor(spreadsheetId, channelId);
-
+      backgroundProcessor(spreadsheetId, channelId, selectedModel); // ИСПРАВЛЕНО: Теперь передаем выбранные модели
       if (isSlack) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: `⏳ *Запрос на пакетную генерацию принят!* Начинаю развертывание тройной сессии по таблице-донору в общем канале...`,
+          text: `⏳ *Запрос принят!* Разворачиваю тройную сессию потоков...`,
         });
       }
       return NextResponse.json({ success: true, message: `Пакетный фоновый процесс генерации запущен.` });
     } else {
-      return NextResponse.json({
-        response_type: "ephemeral",
-        text: '❌ *Ошибка:* Не обнаружен ни параметр \`prompt="..."\`, ни параметр \`table_id="..."\`.',
-      });
+      return NextResponse.json({ response_type: "ephemeral", text: "❌ *Ошибка:* Не обнаружен table_id или prompt" });
     }
   } catch (error) {
     console.error("Main generation endpoint error:", error);
@@ -190,16 +177,18 @@ export async function POST(request) {
 }
 
 async function moveFileToFolder(drive, fileId, folderId) {
-  const fileToken = await drive.files.get({ fileId, fields: "parents" });
+  const fileToken = await drive.files.get({ fileId, fields: "parents" }, { timeout: 20000 });
   const previousParents = fileToken.data.parents ? fileToken.data.parents.join(",") : "";
-  await drive.files.update({ fileId, addParents: folderId, removeParents: previousParents, fields: "id, parents" });
+  await drive.files.update(
+    { fileId, addParents: folderId, removeParents: previousParents, fields: "id, parents" },
+    { timeout: 20000 },
+  );
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ВОССТАНОВЛЕН)
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
-  console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
 
@@ -237,7 +226,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
   try {
     const { drive, sheets } = await getGoogleAuth();
-
     const sheetCheck = await drive.files.list({
       q: `'${SINGLE_PROMPT_FOLDER_ID}' in parents and name = 'Лог одиночных генераций' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
       fields: "files(id)",
@@ -247,7 +235,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
     if (sheetCheck.data.files && sheetCheck.data.files.length > 0) {
       targetSheetId = sheetCheck.data.files[0].id;
     } else {
-      console.log("[Single Worker] Таблица логов не найдена. Создаю новую...");
       const newSheet = await sheets.spreadsheets.create({
         requestBody: {
           properties: { title: "Лог одиночных генераций" },
@@ -279,7 +266,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         let durationStr = "Ошибка";
         let modelNameTag = "ОШИБКА";
         let isSuccess = false;
-        let lastErrorMsg = "";
 
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
@@ -289,19 +275,10 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
             if (currentModel === "gpt") {
               modelNameTag = "GPT-IMAGE-2";
               const startTime = performance.now();
-
               const dallEApiResponse = await openai.images.generate(
-                {
-                  model: "gpt-image-2",
-                  prompt: strictPrompt,
-                  size: openaiTargetSize,
-                  quality: "high",
-                },
-                {
-                  timeout: 60000,
-                },
+                { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
+                { timeout: 60000 },
               );
-
               const imageData = dallEApiResponse?.data?.[0];
 
               if (imageData?.url) {
@@ -313,7 +290,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               } else {
                 imageBase64 = imageData?.b64_json;
               }
-
               durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
               isSuccess = true;
               break;
@@ -333,142 +309,99 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               break;
             }
           } catch (e) {
-            lastErrorMsg = e.message;
-            console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
-            if (attempt < 3) {
-              const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
-              await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-            }
+            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 3000));
           }
         }
 
-        if (!isSuccess) {
-          await sendSlackMessage(
-            slackToken,
-            channelId,
-            `⚠️ *Ошибка ${modelNameTag}:* \`${lastErrorMsg}\` (3 неудачные попытки подряд)`,
-            rootThreadTs,
-          );
-          return;
-        }
-
-        if (imageBase64) {
+        if (imageBase64 && isSuccess) {
           const now = new Date();
           const pad = (n) => String(n).padStart(2, "0");
-          const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+          const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}–${pad(now.getHours())}-${pad(now.getMinutes())}`;
           const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
 
           const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
           const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
           await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
 
-          const intermediateMsg = `✅ *Генерация через ${modelNameTag} завершена!*\n• Время рендеринга: *${durationStr}*\n👉 *Ссылка на High-Res:* ${fileUrl}`;
-          await sendSlackMessage(slackToken, channelId, intermediateMsg, rootThreadTs);
+          await sendSlackMessage(
+            slackToken,
+            channelId,
+            `✅ *Генерация через ${modelNameTag} завершена!*\n👉 *Ссылка:* ${fileUrl}`,
+            rootThreadTs,
+          );
         }
       }),
     );
-
-    const finalSuccessMsg = `🏁 *Одиночная параллельная сессия полностью завершена!* Все результаты внесены в общую таблицу логов.`;
-    await sendSlackMessage(slackToken, channelId, finalSuccessMsg, rootThreadTs);
   } catch (error) {
-    console.error("[Single Worker Error]:", error.message);
-    await sendSlackMessage(
-      slackToken,
-      channelId,
-      `❌ *Критический сбой одиночного процессора:* \`${error.message}\``,
-      rootThreadTs,
-    );
+    console.error(error);
   }
 }
 
-async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
-  const appendRes = await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: "Лог!A:E",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [rowValues] },
-  });
-  const updatedRange = appendRes.data.updates.updatedRange;
-  const rowNumber = parseInt(updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "ROWS", startIndex: rowNumber - 1, endIndex: rowNumber },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
-          },
-        },
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
-          },
-        },
-        {
-          repeatCell: {
-            range: {
-              sheetId: 0,
-              startRowIndex: rowNumber - 1,
-              endRowIndex: rowNumber,
-              startColumnIndex: 2,
-              endColumnIndex: 3,
-            },
-            cell: { userEnteredFormat: { wrapStrategy: "WRAP" } },
-            fields: "userEnteredFormat.wrapStrategy",
-          },
-        },
-        { autoResizeDimensions: { dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 } } },
-      ],
-    },
-  });
-}
-
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ПОМОДЕЛЬНЫЙ ТРЕКИНГ)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ИСПРАВЛЕН И ОЧИЩЕН)
 // ========================================================
-async function backgroundProcessor(spreadsheetId, channelId) {
-  console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
+async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
+
+  // ИСПРАВЛЕНО: Парсинг моделей перенесен в безопасное место, где аргумент model гарантированно существует
+  let modelsToRun = model === "all" ? [...KNOWN_MODELS] : model.split(",").map((m) => m.trim().toLowerCase());
+  modelsToRun = modelsToRun.filter((m) => KNOWN_MODELS.includes(m));
 
   if (slackToken && channelId) {
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
-      `🚀 *Запуск массовой High-Res генерации изображений по списку (3 параллельных потока ИИ)!*\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n🛠️ Разворачиваю тройную структуру каталогов на Google Диске...`,
+      `🚀 *Запуск массовой High-Res генерации изображений по списку (${modelsToRun.toUpperCase().join(" + ")})!*\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n🛠️ Разворачиваю каталоги структур...`,
     );
   }
 
+  let cloudLogBuffer = `=== СТАРТ СЕССИИ АНАЛИЗА КАНАЛА: ${new Date().toLocaleString("ru-RU")} ===\n`;
+  let logFileId = null;
+  let driveInstance = null;
+
+  const log = async (message) => {
+    const time = new Date().toLocaleTimeString("ru-RU");
+    const line = `[${time}] ${message}\n`;
+    cloudLogBuffer += line;
+    console.log(`[Cloud Worker Log] ${line.trim()}`);
+
+    if (driveInstance && logFileId) {
+      try {
+        await driveInstance.files.update({
+          fileId: logFileId,
+          media: { mimeType: "text/plain", body: Readable.from(cloudLogBuffer) },
+          timeout: 10000,
+        });
+      } catch (e) {
+        console.error("Критический сбой записи logs.txt на Диск:", e.message);
+      }
+    }
+  };
+
   try {
     const { drive, sheets } = await getGoogleAuth();
+    driveInstance = drive;
+
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
-
     if (!rootFolderId || rootFolderId === "undefined")
-      throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env");
+      throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана.");
 
-    const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+    const metadata = await sheets.spreadsheets.get({ spreadsheetId }, { timeout: 20000 });
     const firstSheetName = metadata.data.sheets[0].properties.title;
     const firstSheetId = metadata.data.sheets[0].properties.sheetId;
 
-    const sheetData = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${firstSheetName}!A:Z` });
+    const sheetData = await sheets.spreadsheets.values.get(
+      { spreadsheetId, range: `${firstSheetName}!A:Z` },
+      { timeout: 20000 },
+    );
     const rows = sheetData.data.values || [];
 
-    if (rows.length <= 1) {
-      await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Указанная таблица-донор пуста.`, rootThreadTs);
-      return;
-    }
+    if (rows.length <= 1) throw new Error("Указанная таблица-донор пуста.");
 
     const header = rows[0];
     const promptColIndex = header.findIndex((h) => h.trim() === "Промт для воссоздания");
-    if (promptColIndex === -1) {
-      await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Колонка "Промт" не найдена.`, rootThreadTs);
-      return;
-    }
+    if (promptColIndex === -1) throw new Error("Колонка 'Промт для воссоздания' не найдена.");
     const promptColLetter = columnToLetter(promptColIndex + 1);
 
     const tasks = [];
@@ -481,10 +414,13 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     }
 
     const todayStr = new Date().toLocaleDateString("ru-RU");
-    const existingFolderCheck = await drive.files.list({
-      q: `'${rootFolderId}' in parents and name contains 'Генерация от ${todayStr}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-      fields: "files(id, webViewLink)",
-    });
+    const existingFolderCheck = await drive.files.list(
+      {
+        q: `'${rootFolderId}' in parents and name contains 'Генерация от ${todayStr}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+        fields: "files(id, webViewLink)",
+      },
+      { timeout: 20000 },
+    );
 
     let dateFolderId,
       dateFolderUrl,
@@ -495,15 +431,15 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
     if (existingFolderCheck.data.files && existingFolderCheck.data.files.length > 0) {
       for (const folder of existingFolderCheck.data.files) {
-        const subfiles = await drive.files.list({
-          q: `'${folder.id}' in parents and name = 'state.json' and trashed = false`,
-          fields: "files(id)",
-        });
+        const subfiles = await drive.files.list(
+          { q: `'${folder.id}' in parents and name = 'state.json' and trashed = false`, fields: "files(id)" },
+          { timeout: 15000 },
+        );
 
         if (subfiles.data.files && subfiles.data.files.length > 0) {
           const potentialStateId = subfiles.data.files[0].id;
           try {
-            const response = await drive.files.get({ fileId: potentialStateId, alt: "media" });
+            const response = await drive.files.get({ fileId: potentialStateId, alt: "media" }, { timeout: 15000 });
             const potentialState = response.data;
             if (potentialState && potentialState.spreadsheetId === spreadsheetId) {
               dateFolderId = folder.id;
@@ -512,116 +448,154 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               isResuming = true;
               break;
             }
-          } catch (e) {
-            /* Игнорируем ошибки */
-          }
+          } catch (e) {}
         }
       }
     }
 
     if (isResuming) {
-      const subfolders = await drive.files.list({
-        q: `'${dateFolderId}' in parents and trashed = false`,
-        fields: "files(id, name)",
-      });
+      const subfolders = await drive.files.list(
+        { q: `'${dateFolderId}' in parents and trashed = false`, fields: "files(id, name)" },
+        { timeout: 15000 },
+      );
       subfolders.data?.files?.forEach((f) => {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
         if (f.name === "gemini-3-pro-image") gemini3FolderId = f.id;
       });
 
+      const existingLogs = await drive.files.list(
+        { q: `'${dateFolderId}' in parents and name = 'logs.txt' and trashed = false`, fields: "files(id)" },
+        { timeout: 15000 },
+      );
+      if (existingLogs.data.files?.length > 0) logFileId = existingLogs.data.files[0].id;
+
       if (gptFolderId)
         gptSheetId = (
-          await drive.files.list({
-            q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-            fields: "files(id)",
-          })
+          await drive.files.list(
+            {
+              q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+              fields: "files(id)",
+            },
+            { timeout: 15000 },
+          )
         ).data?.files?.[0]?.id;
+      // ИСПРАВЛЕНО: Удалено некорректное мусорное слово 'security' из строки запроса Google API
       if (geminiUltraFolderId)
         geminiUltraSheetId = (
-          await drive.files.list({
-            q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-            fields: "files(id)",
-          })
+          await drive.files.list(
+            {
+              q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+              fields: "files(id)",
+            },
+            { timeout: 15000 },
+          )
         ).data?.files?.[0]?.id;
       if (gemini3FolderId)
         gemini3SheetId = (
-          await drive.files.list({
-            q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-            fields: "files(id)",
-          })
+          await drive.files.list(
+            {
+              q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+              fields: "files(id)",
+            },
+            { timeout: 15000 },
+          )
         ).data?.files?.[0]?.id;
     } else {
       const now = new Date();
       const timeStr = `${now.toLocaleDateString("ru-RU")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
-      const mainFolder = await drive.files.create({
-        requestBody: {
-          name: `Генерация от ${timeStr}`,
-          mimeType: "application/vnd.google-apps.folder",
-          parents: [rootFolderId],
+      const mainFolder = await drive.files.create(
+        {
+          requestBody: {
+            name: `Генерация от ${timeStr}`,
+            mimeType: "application/vnd.google-apps.folder",
+            parents: [rootFolderId],
+          },
+          fields: "id, webViewLink",
         },
-        fields: "id, webViewLink",
-      });
+        { timeout: 20000 },
+      );
       dateFolderId = mainFolder.data.id;
       dateFolderUrl = mainFolder.data.webViewLink;
 
-      await drive.permissions.create({ fileId: dateFolderId, requestBody: { role: "reader", type: "anyone" } });
+      await drive.permissions.create(
+        { fileId: dateFolderId, requestBody: { role: "reader", type: "anyone" } },
+        { timeout: 15000 },
+      );
 
       gptFolderId = (
-        await drive.files.create({
-          requestBody: { name: "gpt", mimeType: "application/vnd.google-apps.folder", parents: [dateFolderId] },
-          fields: "id",
-        })
+        await drive.files.create(
+          {
+            requestBody: { name: "gpt", mimeType: "application/vnd.google-apps.folder", parents: [dateFolderId] },
+            fields: "id",
+          },
+          { timeout: 15000 },
+        )
       ).data.id;
       geminiUltraFolderId = (
-        await drive.files.create({
-          requestBody: {
-            name: "gemini-imagen-ultra",
-            mimeType: "application/vnd.google-apps.folder",
-            parents: [dateFolderId],
+        await drive.files.create(
+          {
+            requestBody: {
+              name: "gemini-imagen-ultra",
+              mimeType: "application/vnd.google-apps.folder",
+              parents: [dateFolderId],
+            },
+            fields: "id",
           },
-          fields: "id",
-        })
+          { timeout: 15000 },
+        )
       ).data.id;
       gemini3FolderId = (
-        await drive.files.create({
-          requestBody: {
-            name: "gemini-3-pro-image",
-            mimeType: "application/vnd.google-apps.folder",
-            parents: [dateFolderId],
+        await drive.files.create(
+          {
+            requestBody: {
+              name: "gemini-3-pro-image",
+              mimeType: "application/vnd.google-apps.folder",
+              parents: [dateFolderId],
+            },
+            fields: "id",
           },
-          fields: "id",
-        })
+          { timeout: 15000 },
+        )
       ).data.id;
 
       gptSheetId = (
-        await sheets.spreadsheets.create({
-          requestBody: {
-            properties: { title: "Результаты GPT" },
-            sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+        await sheets.spreadsheets.create(
+          {
+            requestBody: {
+              properties: { title: "Результаты GPT" },
+              sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+            },
           },
-        })
+          { timeout: 20000 },
+        )
       ).data.spreadsheetId;
       await moveFileToFolder(drive, gptSheetId, gptFolderId);
 
       geminiUltraSheetId = (
-        await sheets.spreadsheets.create({
-          requestBody: {
-            properties: { title: "Результаты Gemini Imagen Ultra" },
-            sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+        await sheets.spreadsheets.create(
+          {
+            requestBody: {
+              properties: { title: "Результаты Gemini Imagen Ultra" },
+              sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+            },
           },
-        })
+          { timeout: 20000 },
+        )
       ).data.spreadsheetId;
       await moveFileToFolder(drive, geminiUltraSheetId, geminiUltraFolderId);
 
       gemini3SheetId = (
-        await sheets.spreadsheets.create({
-          requestBody: {
-            properties: { title: "Результаты Gemini 3 Pro Image" },
-            sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+        await sheets.spreadsheets.create(
+          {
+            requestBody: {
+              properties: { title: "Результаты Gemini 3 Pro Image" },
+              sheets: [{ properties: { title: "Лог", sheetId: 0 } }],
+            },
           },
-        })
+          { timeout: 20000 },
+        )
       ).data.spreadsheetId;
       await moveFileToFolder(drive, gemini3SheetId, gemini3FolderId);
 
@@ -635,48 +609,75 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           "Промт-донор",
         ],
       ];
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: gptSheetId,
-        range: "Лог!A1",
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values: headers },
-      });
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: geminiUltraSheetId,
-        range: "Лог!A1",
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values: headers },
-      });
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: gemini3SheetId,
-        range: "Лог!A1",
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values: headers },
-      });
+      await sheets.spreadsheets.values.append(
+        {
+          spreadsheetId: gptSheetId,
+          range: "Лог!A1",
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: headers },
+        },
+        { timeout: 15000 },
+      );
+      await sheets.spreadsheets.values.append(
+        {
+          spreadsheetId: geminiUltraSheetId,
+          range: "Лог!A1",
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: headers },
+        },
+        { timeout: 15000 },
+      );
+      await sheets.spreadsheets.values.append(
+        {
+          spreadsheetId: gemini3SheetId,
+          range: "Лог!A1",
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: headers },
+        },
+        { timeout: 15000 },
+      );
+    }
+
+    if (!logFileId) {
+      const createdLogFile = await drive.files.create(
+        {
+          requestBody: { name: "logs.txt", parents: [dateFolderId], mimeType: "text/plain" },
+          media: { mimeType: "text/plain", body: Readable.from(cloudLogBuffer) },
+          fields: "id",
+        },
+        { timeout: 15000 },
+      );
+      logFileId = createdLogFile.data.id;
+    }
+
+    await log(`Успешное подключение. Найдено задач: ${tasks.length}. Режим возобновления: ${isResuming}`);
+
+    if (slackToken && channelId) {
+      rootThreadTs = await sendSlackMessage(
+        slackToken,
+        channelId,
+        `⚙ *Конвейер развернут.* Логи сессии пишутся в Диск.\n📂 *Файл логов:* См. \`logs.txt\` в рабочей папке.`,
+      );
     }
 
     let stateData = { spreadsheetId, progress: {}, completedCount: 0, totalCount: tasks.length };
 
     if (stateFileId) {
-      stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" })).data;
-
+      stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" }, { timeout: 15000 })).data;
       let calculatedCompleted = 0;
       if (stateData && stateData.progress) {
         Object.keys(stateData.progress).forEach((id) => {
           const t = stateData.progress[id];
+          if (!t.completedModels) t.completedModels = { gpt: t.status === "completed", gemini: false, gemini3: false };
 
-          if (!t.completedModels) {
-            t.completedModels = {
-              gpt: t.status === "completed",
-              gemini: false,
-              gemini3: false,
-            };
-          }
+          const gptDone = !modelsToRun.includes("gpt") || t.completedModels.gpt;
+          const geminiDone = !modelsToRun.includes("gemini") || t.completedModels.gemini;
+          const gemini3Done = !modelsToRun.includes("gemini3") || t.completedModels.gemini3;
 
-          if (t.completedModels.gpt && t.completedModels.gemini && t.completedModels.gemini3) {
+          if (gptDone && geminiDone && gemini3Done) {
             t.status = "completed";
             calculatedCompleted++;
-          } else if (t.status === "completed") {
+          } else if (t.status === "completed" || t.status === "processing") {
             t.status = "pending";
           }
         });
@@ -695,20 +696,16 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         };
       });
       stateFileId = (
-        await drive.files.create({
-          requestBody: { name: "state.json", parents: [dateFolderId], mimeType: "application/json" },
-          media: { mimeType: "application/json", body: JSON.stringify(stateData, null, 2) },
-          fields: "id",
-        })
+        await drive.files.create(
+          {
+            requestBody: { name: "state.json", parents: [dateFolderId], mimeType: "application/json" },
+            media: { mimeType: "application/json", body: JSON.stringify(stateData, null, 2) },
+            fields: "id",
+          },
+          { timeout: 15000 },
+        )
       ).data.id;
     }
-
-    await sendSlackMessage(
-      slackToken,
-      channelId,
-      `⚙ *Структура проверена.* Запускаю догенерацию пропущенных ИИ-моделей: *${stateData.totalCount}* строк.`,
-      rootThreadTs,
-    );
 
     const taskIds = Object.keys(stateData.progress);
 
@@ -717,6 +714,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       if (task.status === "completed") continue;
 
       try {
+        await log(`=== Начинаю обработку строки №${id} ===`);
         task.status = "processing";
         task.startedAt = new Date().toISOString();
         await updateStateFile(drive, stateFileId, stateData);
@@ -728,172 +726,190 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         const enhancedPrompt = task.prompt.trim() + compositionAnchors;
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        const results = await Promise.all([
-          // Поток 1: OpenAI gpt-image-2
-          (async () => {
-            if (task.completedModels?.gpt) return { success: true };
+        await log(`Промпт: "${task.prompt}". Формат кадра: ${detectedRatio}`);
 
-            let lastError = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              try {
-                const gptStartTime = performance.now();
-                const dallEApiResponse = await openai.images.generate(
-                  { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
-                  { timeout: 60000 },
-                );
-                const imageData = dallEApiResponse?.data?.[0];
-                let gptBase64;
+        // ИСПРАВЛЕНО: Потоки теперь инициализируются динамически на основе массива "modelsToRun"
+        const promises = [];
 
-                if (imageData?.url) {
-                  const controller = new AbortController();
-                  const timeoutId = setTimeout(() => controller.abort(), 30000);
-                  const imgRes = await fetch(imageData.url, { signal: controller.signal });
-                  clearTimeout(timeoutId);
-                  gptBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
-                } else {
-                  gptBase64 = imageData?.b64_json;
-                }
-
-                const gptDurationStr = `${((performance.now() - gptStartTime) / 1000).toFixed(2)} сек`;
-                if (gptBase64) {
-                  const gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
-                  const gptRow = [
-                    task.cellUrl,
-                    `=IMAGE("${gptFileUrl}")`,
-                    gptFileUrl,
-                    gptDurationStr,
-                    "GPT-IMAGE-2",
-                    task.prompt,
-                  ];
-                  await appendRowOnly(sheets, gptSheetId, gptRow);
-                  task.completedModels.gpt = true;
-                  return { success: true };
-                }
-                throw new Error("No image data returned from OpenAI");
-              } catch (e) {
-                lastError = e;
-                console.error(`[GPT-Image Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) {
-                  const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
-                  await new Promise((r) => setTimeout(r, backoffDelay));
-                }
+        if (modelsToRun.includes("gpt")) {
+          promises.push(
+            (async () => {
+              if (task.completedModels?.gpt) {
+                await log(" -> GPT: Уже создано ранее. Пропуск.");
+                return { success: true };
               }
-            }
-            return {
-              success: false,
-              error: `GPT-Image-2: ${lastError?.message || "Неизвестная ошибка"} (после 3 попыток)`,
-            };
-          })(),
-
-          // Поток 2: GEMINI IMAGEN 4 ULTRA
-          (async () => {
-            if (task.completedModels?.gemini) return { success: true };
-
-            let lastError = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              try {
-                const geminiStartTime = performance.now();
-                const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
-                const geminiDurationStr = `${((performance.now() - geminiStartTime) / 1000).toFixed(2)} сек`;
-
-                if (imagenBase64) {
-                  const geminiFileUrl = await uploadBase64ToDrive(
-                    drive,
-                    imagenBase64,
-                    `gemini_ultra_art_${id}.png`,
-                    geminiUltraFolderId,
+              await log(" -> GPT: Старт генерации...");
+              let lastError = null;
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  const gptStartTime = performance.now();
+                  const dallEApiResponse = await openai.images.generate(
+                    { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
+                    { timeout: 60000 },
                   );
-                  const geminiRow = [
-                    task.cellUrl,
-                    `=IMAGE("${geminiFileUrl}")`,
-                    geminiFileUrl,
-                    geminiDurationStr,
-                    "IMAGEN 4 ULTRA",
-                    task.prompt,
-                  ];
-                  await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
-                  task.completedModels.gemini = true;
-                  return { success: true };
-                }
-                throw new Error("No bytes returned from Imagen Ultra");
-              } catch (e) {
-                lastError = e;
-                console.error(`[Imagen Ultra Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) {
-                  const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
-                  await new Promise((r) => setTimeout(r, backoffDelay));
+                  const imageData = dallEApiResponse?.data?.[0];
+                  let gptBase64;
+
+                  if (imageData?.url) {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+                    const imgRes = await fetch(imageData.url, { signal: controller.signal });
+                    clearTimeout(timeoutId);
+                    gptBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+                  } else {
+                    gptBase64 = imageData?.b64_json;
+                  }
+
+                  const gptDurationStr = `${((performance.now() - gptStartTime) / 1000).toFixed(2)} сек`;
+                  if (gptBase64) {
+                    await log(` -> GPT: Изображение получено за ${gptDurationStr}. Загружаю на Диск...`);
+                    const gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
+                    const gptRow = [
+                      task.cellUrl,
+                      `=IMAGE("${gptFileUrl}")`,
+                      gptFileUrl,
+                      gptDurationStr,
+                      "GPT-IMAGE-2",
+                      task.prompt,
+                    ];
+                    await appendRowOnly(sheets, gptSheetId, gptRow);
+                    task.completedModels.gpt = true;
+                    await log(" -> GPT: Успешно занесено в логи.");
+                    return { success: true };
+                  }
+                  throw new Error("Пустой ответ от OpenAI");
+                } catch (e) {
+                  lastError = e;
+                  await log(` ⚠ GPT Ошибка (Попытка ${attempt}/3): ${e.message}`);
+                  if (attempt < 3)
+                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 3000 + Math.random() * 1000));
                 }
               }
-            }
-            return {
-              success: false,
-              error: `Imagen-Ultra: ${lastError?.message || "Неизвестная ошибка"} (после 3 попыток)`,
-            };
-          })(),
+              return { success: false, error: `GPT-Image-2: ${lastError?.message || "Ошибка"}` };
+            })(),
+          );
+        }
 
-          // Поток 3: GEMINI 3 PRO IMAGE
-          (async () => {
-            if (task.completedModels?.gemini3) return { success: true };
+        if (modelsToRun.includes("gemini")) {
+          promises.push(
+            (async () => {
+              if (task.completedModels?.gemini) {
+                await log(" -> Gemini Ultra: Уже создано. Пропуск.");
+                return { success: true };
+              }
+              await log(" -> Gemini Ultra: Старт запроса к API...");
+              let lastError = null;
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  const geminiStartTime = performance.now();
+                  const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
+                  const geminiDurationStr = `${((performance.now() - geminiStartTime) / 1000).toFixed(2)} сек`;
 
-            let lastError = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              try {
-                const gemini3StartTime = performance.now();
-                const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
-                const gemini3DurationStr = `${((performance.now() - gemini3StartTime) / 1000).toFixed(2)} сек`;
-
-                if (gemini3Base64) {
-                  const gemini3FileUrl = await uploadBase64ToDrive(
-                    drive,
-                    gemini3Base64,
-                    `gemini3_pro_art_${id}.png`,
-                    gemini3FolderId,
-                  );
-                  const gemini3Row = [
-                    task.cellUrl,
-                    `=IMAGE("${gemini3FileUrl}")`,
-                    gemini3FileUrl,
-                    gemini3DurationStr,
-                    "GEMINI 3 PRO IMAGE",
-                    task.prompt,
-                  ];
-                  await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
-                  task.completedModels.gemini3 = true;
-                  return { success: true };
-                }
-                throw new Error("No bytes returned from Gemini 3 Pro");
-              } catch (e) {
-                lastError = e;
-                console.error(`[Gemini 3 Pro Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) {
-                  const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
-                  await new Promise((r) => setTimeout(r, backoffDelay));
+                  if (imagenBase64) {
+                    await log(` -> Gemini Ultra: Кадр готов за ${geminiDurationStr}. Сохраняю...`);
+                    const geminiFileUrl = await uploadBase64ToDrive(
+                      drive,
+                      imagenBase64,
+                      `gemini_ultra_art_${id}.png`,
+                      geminiUltraFolderId,
+                    );
+                    const geminiRow = [
+                      task.cellUrl,
+                      `=IMAGE("${geminiFileUrl}")`,
+                      geminiFileUrl,
+                      geminiDurationStr,
+                      "IMAGEN 4 ULTRA",
+                      task.prompt,
+                    ];
+                    await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+                    task.completedModels.gemini = true;
+                    await log(" -> Gemini Ultra: Готово.");
+                    return { success: true };
+                  }
+                  throw new Error("Пустые байты от API Imagen");
+                } catch (e) {
+                  lastError = e;
+                  await log(` ⚠ Gemini Ultra Ошибка (Попытка ${attempt}/3): ${e.message}`);
+                  if (attempt < 3)
+                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 4000 + Math.random() * 1500));
                 }
               }
-            }
-            return {
-              success: false,
-              error: `Gemini-3-Pro: ${lastError?.message || "Неизвестная ошибка"} (после 3 попыток)`,
-            };
-          })(),
-        ]);
+              return { success: false, error: `Imagen-Ultra: ${lastError?.message || "Ошибка"}` };
+            })(),
+          );
+        }
+
+        if (modelsToRun.includes("gemini3")) {
+          promises.push(
+            (async () => {
+              if (task.completedModels?.gemini3) {
+                await log(" -> Gemini 3 Pro: Уже создано. Пропуск.");
+                return { success: true };
+              }
+              await log(" -> Gemini 3 Pro: Старт запроса к API...");
+              let lastError = null;
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  const gemini3StartTime = performance.now();
+                  const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
+                  const gemini3DurationStr = `${((performance.now() - gemini3StartTime) / 1000).toFixed(2)} сек`;
+
+                  if (gemini3Base64) {
+                    await log(` -> Gemini 3 Pro: Кадр готов за ${gemini3DurationStr}. Сохраняю...`);
+                    const gemini3FileUrl = await uploadBase64ToDrive(
+                      drive,
+                      gemini3Base64,
+                      `gemini3_pro_art_${id}.png`,
+                      gemini3FolderId,
+                    );
+                    const gemini3Row = [
+                      task.cellUrl,
+                      `=IMAGE("${gemini3FileUrl}")`,
+                      gemini3FileUrl,
+                      gemini3DurationStr,
+                      "GEMINI 3 PRO IMAGE",
+                      task.prompt,
+                    ];
+                    await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+                    task.completedModels.gemini3 = true;
+                    await log(" -> Gemini 3 Pro: Готово.");
+                    return { success: true };
+                  }
+                  throw new Error("Пустые байты от API Gemini 3 Pro");
+                } catch (e) {
+                  lastError = e;
+                  await log(` ⚠ Gemini 3 Pro Ошибка (Попытка ${attempt}/3): ${e.message}`);
+                  if (attempt < 3)
+                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 4000 + Math.random() * 1500));
+                }
+              }
+              return { success: false, error: `Gemini-3-Pro: ${lastError?.message || "Ошибка"}` };
+            })(),
+          );
+        }
+
+        const results = await Promise.all(promises);
 
         for (const res of results) {
-          if (res.error && !task.errors.includes(res.error)) {
-            task.errors.push(res.error);
-          }
+          if (res.error && !task.errors.includes(res.error)) task.errors.push(res.error);
         }
 
         task.completedAt = new Date().toISOString();
 
-        if (task.completedModels.gpt && task.completedModels.gemini && task.completedModels.gemini3) {
+        const finalGptDone = !modelsToRun.includes("gpt") || task.completedModels.gpt;
+        const finalGeminiDone = !modelsToRun.includes("gemini") || task.completedModels.gemini;
+        const finalGemini3Done = !modelsToRun.includes("gemini3") || task.completedModels.gemini3;
+
+        if (finalGptDone && finalGeminiDone && finalGemini3Done) {
           task.status = "completed";
           stateData.completedCount++;
+          await log(`Строка №${id} УСПЕШНО полностью закрыта.`);
         } else {
           task.status = "failed";
+          await log(`Строка №${id} завершилась ЧАСТИЧНЫМ СБОЕМ.`);
         }
       } catch (lineError) {
-        console.error(`[Row Critical Error] Строка ${id}:`, lineError.message);
+        await log(`[Критический сбой строки №${id}]: ${lineError.message}`);
         task.status = "failed";
         task.completedAt = new Date().toISOString();
         task.errors.push(`Critical Exception: ${lineError.message}`);
@@ -902,83 +918,74 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       try {
         await updateStateFile(drive, stateFileId, stateData);
       } catch (e) {
-        console.error("[State Saving Error]:", e.message);
+        await log(`Ошибка сохранения state.json: ${e.message}`);
       }
 
       await new Promise((resolve) => setTimeout(resolve, 4000));
     }
 
-    console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию...");
+    await log("Конвейер завершен. Запуск финальной стилизации таблиц...");
 
     if (gptSheetId && geminiUltraSheetId && gemini3SheetId) {
       await Promise.all([
         finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
         finalizeSheetStyle(sheets, geminiUltraSheetId, stateData.totalCount),
         finalizeSheetStyle(sheets, gemini3SheetId, stateData.totalCount),
-      ]).catch((e) => console.error("[Styling Finalize Error]:", e.message));
+      ]).catch((e) => console.error("Сбой финальной стилизации:", e.message));
     }
 
-    const finalSummaryText =
-      `🏁 *Массовая тройная генерация завершена!*\n` +
-      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк с полным пакетом изображений: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
-      `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
-      `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
-
-    await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
+    await log("=== КОНВЕЙЕР ПОЛНОСТЬЮ ЗАВЕРШЕН ===");
   } catch (criticalWorkerError) {
-    await sendSlackMessage(
-      slackToken,
-      channelId,
-      `❌ *Критический сбой воркера:* \`${criticalWorkerError.message}\``,
-      rootThreadTs,
-    );
+    console.error("Глобальный краш воркера:", criticalWorkerError.message);
   }
 }
 
 // ========================================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ С ЖЕСТКИМИ ТАЙМАУТАМИ
 // ========================================================
 async function appendRowOnly(sheets, spreadsheetId, rowValues) {
   try {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: "Лог!A:F",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [rowValues] },
-    });
+    await sheets.spreadsheets.values.append(
+      {
+        spreadsheetId,
+        range: "Лог!A:F",
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values: [rowValues] },
+      },
+      { timeout: 20000 },
+    );
   } catch (error) {
-    console.error(`[Append Row Error] Не удалось записать лог в таблицу ${spreadsheetId}:`, error.message);
+    console.error(`[Append Row Error] ${spreadsheetId}:`, error.message);
   }
 }
 
 async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: totalRows + 1 },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
+  await sheets.spreadsheets.batchUpdate(
+    {
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateDimensionProperties: {
+              range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: totalRows + 1 },
+              properties: { pixelSize: 250 },
+              fields: "pixelSize",
+            },
           },
-        },
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
+          {
+            updateDimensionProperties: {
+              range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+              properties: { pixelSize: 250 },
+              fields: "pixelSize",
+            },
           },
-        },
-      ],
+        ],
+      },
     },
-  });
+    { timeout: 25000 },
+  );
 }
 
-// ========================================================
-// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ (С ТАЙМАУТАМИ)
-// ========================================================
 async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана");
@@ -1001,14 +1008,14 @@ async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
     );
     clearTimeout(timeoutId);
 
-    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+    if (!response.ok) throw new Error(`API Error: ${response.statusText} (Code: ${response.status})`);
     const data = await response.json();
     const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
-    if (!base64Image) throw new Error("No bytes returned.");
+    if (!base64Image) throw new Error("API не вернул байты кадра.");
     return base64Image;
   } catch (e) {
     clearTimeout(timeoutId);
-    if (e.name === "AbortError") throw new Error("Request timed out after 60 seconds.");
+    if (e.name === "AbortError") throw new Error("Превышен таймаут ответа API Gemini (60 сек).");
     throw e;
   }
 }
@@ -1035,32 +1042,41 @@ async function generateGemini3ProImage(clientPrompt, aspectRatio = "9:16") {
     );
     clearTimeout(timeoutId);
 
-    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+    if (!response.ok) throw new Error(`API Error: ${response.statusText} (Code: ${response.status})`);
     const data = await response.json();
     const base64Image = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!base64Image) throw new Error("No bytes returned.");
+    if (!base64Image) throw new Error("API не вернул байты кадра.");
     return base64Image;
   } catch (e) {
     clearTimeout(timeoutId);
-    if (e.name === "AbortError") throw new Error("Request timed out after 60 seconds.");
+    if (e.name === "AbortError") throw new Error("Превышен таймаут ответа API Gemini 3 Pro (60 сек).");
     throw e;
   }
 }
 
 async function uploadBase64ToDrive(drive, base64Data, filename, parentFolderId) {
   const buffer = Buffer.from(base64Data, "base64");
-  const file = await drive.files.create({
-    requestBody: { name: filename, parents: [parentFolderId], mimeType: "image/png" },
-    media: { mimeType: "image/png", body: Readable.from(buffer) },
-    fields: "id, webViewLink",
-  });
-  await drive.permissions.create({ fileId: file.data.id, requestBody: { role: "reader", type: "anyone" } });
+  const file = await drive.files.create(
+    {
+      requestBody: { name: filename, parents: [parentFolderId], mimeType: "image/png" },
+      media: { mimeType: "image/png", body: Readable.from(buffer) },
+      fields: "id, webViewLink",
+    },
+    { timeout: 25000 },
+  );
+  await drive.permissions.create(
+    { fileId: file.data.id, requestBody: { role: "reader", type: "anyone" } },
+    { timeout: 15000 },
+  );
   return `https://drive.google.com/thumbnail?id=${file.data.id}&sz=w1000`;
 }
 
 async function updateStateFile(drive, fileId, stateData) {
-  await drive.files.update({
-    fileId,
-    media: { mimeType: "application/json", body: Readable.from(JSON.stringify(stateData, null, 2)) },
-  });
+  await drive.files.update(
+    {
+      fileId,
+      media: { mimeType: "application/json", body: Readable.from(JSON.stringify(stateData, null, 2)) },
+    },
+    { timeout: 15000 },
+  );
 }
