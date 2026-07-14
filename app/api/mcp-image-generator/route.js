@@ -159,7 +159,7 @@ export async function POST(request) {
       }
       return NextResponse.json({ success: true, message: `Фоновый процесс одиночной генерации запущен.` });
     } else if (spreadsheetId) {
-      backgroundProcessor(spreadsheetId, channelId, selectedModel); // ИСПРАВЛЕНО: Теперь передаем выбранные модели
+      backgroundProcessor(spreadsheetId, channelId, selectedModel);
       if (isSlack) {
         return NextResponse.json({
           response_type: "ephemeral",
@@ -186,7 +186,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ВОССТАНОВЛЕН)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   const slackToken = process.env.SLACK_BOT_TOKEN;
@@ -302,6 +302,8 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               break;
             } else if (currentModel === "gemini3") {
               modelNameTag = "GEMINI 3 PRO IMAGE";
+              // Защита от спама, если запускаются обе модели
+              if (modelsToRun.includes("gemini")) await new Promise((r) => setTimeout(r, 6000));
               const startTime = performance.now();
               imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
               durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
@@ -309,7 +311,11 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               break;
             }
           } catch (e) {
-            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 3000));
+            console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
+            if (attempt < 3) {
+              const delay = attempt === 1 ? 15000 : 45000;
+              await new Promise((resolve) => setTimeout(resolve, delay + Math.random() * 2000));
+            }
           }
         }
 
@@ -338,13 +344,12 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ИСПРАВЛЕН И ОЧИЩЕН)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (УМНАЯ ЗАЩИТА ОТ 429)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
 
-  // Инициализация локального буфера логирования
   let cloudLogBuffer = `=== СТАРТ СЕССИИ ГЕНЕРАЦИИ: ${new Date().toLocaleString("ru-RU")} ===\n`;
   let logFileId = null;
   let driveInstance = null;
@@ -371,7 +376,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   };
 
   try {
-    // ВЕСЬ КОД ТЕПЕРЬ ВНУТРИ TRY-CATCH ДЛЯ 100% ПЕРЕХВАТА ОШИБОК
     let modelsToRun = model === "all" ? [...KNOWN_MODELS] : model.split(",").map((m) => m.trim().toLowerCase());
     modelsToRun = modelsToRun.filter((m) => KNOWN_MODELS.includes(m));
 
@@ -381,7 +385,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
       return;
     }
 
-    // ИСПРАВЛЕНО: Правильный вызов toUpperCase для массива
     const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
 
     if (slackToken && channelId) {
@@ -783,8 +786,11 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 } catch (e) {
                   lastError = e;
                   await log(` ⚠ GPT Ошибка (Попытка ${attempt}/3): ${e.message}`);
-                  if (attempt < 3)
-                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 3000 + Math.random() * 1000));
+                  if (attempt < 3) {
+                    // Удлиненный таймаут для GPT
+                    const backoffDelay = attempt === 1 ? 15000 : 45000;
+                    await new Promise((r) => setTimeout(r, backoffDelay + Math.random() * 2000));
+                  }
                 }
               }
               return { success: false, error: `GPT-Image-2: ${lastError?.message || "Ошибка"}` };
@@ -832,8 +838,11 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 } catch (e) {
                   lastError = e;
                   await log(` ⚠ Gemini Ultra Ошибка (Попытка ${attempt}/3): ${e.message}`);
-                  if (attempt < 3)
-                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 4000 + Math.random() * 1500));
+                  if (attempt < 3) {
+                    // ИСПРАВЛЕНО: Защитный длительный бэкофф от 429
+                    const backoffDelay = attempt === 1 ? 15000 : 45000;
+                    await new Promise((r) => setTimeout(r, backoffDelay + Math.random() * 2000));
+                  }
                 }
               }
               return { success: false, error: `Imagen-Ultra: ${lastError?.message || "Ошибка"}` };
@@ -848,6 +857,13 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 await log(" -> Gemini 3 Pro: Уже создано. Пропуск.");
                 return { success: true };
               }
+
+              // ИСПРАВЛЕНО: Сдвиг фазы на 6 секунд, чтобы не бить в API Gemini одновременно с Ultra
+              if (modelsToRun.includes("gemini") && !task.completedModels?.gemini) {
+                await log(" -> Gemini 3 Pro: Жду 6 секунд для сдвига фазы (Anti-burst)...");
+                await new Promise((r) => setTimeout(r, 6000));
+              }
+
               await log(" -> Gemini 3 Pro: Старт запроса к API...");
               let lastError = null;
               for (let attempt = 1; attempt <= 3; attempt++) {
@@ -881,8 +897,11 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 } catch (e) {
                   lastError = e;
                   await log(` ⚠ Gemini 3 Pro Ошибка (Попытка ${attempt}/3): ${e.message}`);
-                  if (attempt < 3)
-                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 4000 + Math.random() * 1500));
+                  if (attempt < 3) {
+                    // ИСПРАВЛЕНО: Защитный длительный бэкофф от 429
+                    const backoffDelay = attempt === 1 ? 15000 : 45000;
+                    await new Promise((r) => setTimeout(r, backoffDelay + Math.random() * 2000));
+                  }
                 }
               }
               return { success: false, error: `Gemini-3-Pro: ${lastError?.message || "Ошибка"}` };
@@ -923,7 +942,9 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
         await log(`Ошибка сохранения state.json: ${e.message}`);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 4000));
+      // ИСПРАВЛЕНО: Увеличена базовая пауза между строками для защиты от лимитов (15 RPM)
+      await log("Ожидание 8 секунд перед следующей строкой...");
+      await new Promise((resolve) => setTimeout(resolve, 8000));
     }
 
     await log("Конвейер завершен. Запуск финальной стилизации таблиц...");
@@ -938,7 +959,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
 
     await log("=== КОНВЕЙЕР ПОЛНОСТЬЮ ЗАВЕРШЕН ===");
 
-    // ФИНАЛЬНОЕ СООБЩЕНИЕ ОБ УСПЕХЕ В SLACK
     const finalSummaryText =
       `🏁 *Массовая тройная генерация завершена!*\n` +
       `• Всего промптов обработано: *${stateData.totalCount}*\n` +
@@ -948,7 +968,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
 
     await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
-    // ТЕПЕРЬ ОШИБКА ПЕРЕХВАТЫВАЕТСЯ И ОТПРАВЛЯЕТСЯ В СЛАК
     console.error("Глобальный краш воркера:", criticalWorkerError.message);
     if (slackToken && channelId) {
       await sendSlackMessage(
