@@ -76,6 +76,29 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
 }
 
 // ========================================================
+// УМНЫЕ ХЕЛПЕРЫ ДЛЯ АВТОМАТИЧЕСКОГО ОПРЕДЕЛЕНИЯ СООТНОШЕНИЯ СТОРОН
+// ========================================================
+function parseAspectRatio(promptText) {
+  // Ищет упоминание пропорций вида 1:1, 16:9, 9:16, 4:3, 3:4 и т.д.
+  const match = promptText.match(/\b(\d+):(\d+)\b/);
+  if (match) {
+    return `${match[1]}:${match[2]}`;
+  }
+  return "9:16"; // Дефолтный откат системы
+}
+
+function mapOpenAiSize(ratio) {
+  const sizeMap = {
+    "9:16": "1440x2560",
+    "16:9": "2560x1440",
+    "1:1": "1920x1920",
+    "4:3": "2048x1536",
+    "3:4": "1536x2048",
+  };
+  return sizeMap[ratio] || "1440x2560";
+}
+
+// ========================================================
 // ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (КВАТЕРНЫЙ ПАРСЕР КЛЮЧ="ЗНАЧЕНИЕ")
 // ========================================================
 export async function POST(request) {
@@ -170,7 +193,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ДИНАМИЧЕСКОЕ РАТИО)
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -191,6 +214,10 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
     return;
   }
 
+  // Динамически вычисляем соотношение сторон для текущего промпта
+  const detectedRatio = parseAspectRatio(prompt);
+  const openaiTargetSize = mapOpenAiSize(detectedRatio);
+
   const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
 
   if (slackToken && channelId) {
@@ -199,6 +226,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       channelId,
       `🎨 *Запуск одиночной High-Res генерации изображения!*\n` +
         `• *Выбранный стек ИИ:* \`${modelLabel}\`\n` +
+        `• *Формат кадра:* \`${detectedRatio}\` (${currentModel === "gpt" ? openaiTargetSize : "2K Ultra"})\n` +
         `• *Промт:* \`${prompt}\`\n` +
         `🛠 ...Связываюсь со структурами логов на Диске...`,
     );
@@ -255,7 +283,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: "1440x2560",
+            size: openaiTargetSize, // Применяем динамическое разрешение
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -274,7 +302,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         modelNameTag = "IMAGEN 4 ULTRA";
         const startTime = performance.now();
         try {
-          imageBase64 = await generateImagen3(prompt);
+          imageBase64 = await generateImagen3(prompt, detectedRatio); // Передаем динамические пропорции
           const endTime = performance.now();
           durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
@@ -286,7 +314,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         modelNameTag = "GEMINI 3 PRO IMAGE";
         const startTime = performance.now();
         try {
-          imageBase64 = await generateGemini3ProImage(prompt);
+          imageBase64 = await generateGemini3ProImage(prompt, detectedRatio); // Передаем динамические пропорции
           const endTime = performance.now();
           durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
@@ -378,7 +406,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ (ОПТИМИЗИРОВАН)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ДИНАМИЧЕСКОЕ РАТИО)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -643,11 +671,14 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       const task = stateData.progress[id];
       if (task.status === "completed" || task.status === "failed") continue;
 
-      // ИСПРАВЛЕНО: Флаг для отслеживания реального успеха хотя бы одной модели в текущей строке
       let rowSucceeded = false;
 
       try {
         task.status = "processing";
+
+        // Построчно вычисляем соотношение сторон из текущего промпта ячейки таблицы
+        const detectedRatio = parseAspectRatio(task.prompt);
+        const openaiTargetSize = mapOpenAiSize(detectedRatio);
 
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
 
@@ -659,7 +690,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: "1440x2560",
+            size: openaiTargetSize, // Применяем динамическое разрешение
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -692,7 +723,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         let geminiDurationStr = "Ошибка";
         try {
           const geminiStartTime = performance.now();
-          const imagenBase64 = await generateImagen3(task.prompt);
+          const imagenBase64 = await generateImagen3(task.prompt, detectedRatio); // Передаем динамические пропорции
           const geminiEndTime = performance.now();
           geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
 
@@ -723,7 +754,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         let gemini3DurationStr = "Ошибка";
         try {
           const gemini3StartTime = performance.now();
-          const gemini3Base64 = await generateGemini3ProImage(task.prompt);
+          const gemini3Base64 = await generateGemini3ProImage(task.prompt, detectedRatio); // Передаем динамические пропорции
           const gemini3EndTime = performance.now();
           gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
@@ -749,7 +780,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
         }
 
-        // ИСПРАВЛЕНО: Маркируем статус строки на основе РЕАЛЬНОГО выполнения
         if (rowSucceeded) {
           task.status = "completed";
           stateData.completedCount++;
@@ -761,7 +791,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         task.status = "failed";
       }
 
-      // Синхронизируем стейт на Диске раз в 5 строк или на самом последнем элементе
       const currentIdx = taskIds.indexOf(id) + 1;
       if (currentIdx % 5 === 0 || currentIdx === taskIds.length) {
         try {
@@ -771,11 +800,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         }
       }
 
-      // Тактовая пауза в 300мс, чтобы Google API успевал очищать лимиты подключений
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
-    // ИСПРАВЛЕНО: Применяем глобальную стилизацию таблиц ЕДИНОЖДЫ в самом финале воркера (МИНУС 500+ лишних API вызовов)
     console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию интерфейсов таблиц...");
     await Promise.all([
       finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
@@ -804,8 +831,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 // ========================================================
 // НОВЫЕ ХЕРАЛДИЧЕСКИЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
 // ========================================================
-
-// Легкий аппенд: только добавляет сырые данные, не дергая batchUpdate стилей
 async function appendRowOnly(sheets, spreadsheetId, rowValues) {
   await sheets.spreadsheets.values.append({
     spreadsheetId,
@@ -815,7 +840,6 @@ async function appendRowOnly(sheets, spreadsheetId, rowValues) {
   });
 }
 
-// Финальный тяжелый стайлер: вызывается ОДИН раз для всей таблицы целиком
 async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
@@ -841,9 +865,9 @@ async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
 }
 
 // ========================================================
-// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ
+// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ (ПРИНИМАЮТ aspect_ratio)
 // ========================================================
-async function generateImagen3(clientPrompt) {
+async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "imagen-4.0-ultra-generate-001";
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
@@ -854,7 +878,12 @@ async function generateImagen3(clientPrompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       instances: [{ prompt: clientPrompt }],
-      parameters: { sampleCount: 1, aspectRatio: "9:16", imageSize: "2K", outputMimeType: "image/png" },
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: aspectRatio, // Динамические пропорции кадра
+        imageSize: "2K",
+        outputMimeType: "image/png",
+      },
     }),
   });
 
@@ -865,7 +894,7 @@ async function generateImagen3(clientPrompt) {
   return base64Image;
 }
 
-async function generateGemini3ProImage(clientPrompt) {
+async function generateGemini3ProImage(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "gemini-3-pro-image";
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
@@ -878,7 +907,7 @@ async function generateGemini3ProImage(clientPrompt) {
       contents: [{ parts: [{ text: clientPrompt }] }],
       generationConfig: {
         imageConfig: {
-          aspectRatio: "9:16",
+          aspectRatio: aspectRatio, // Динамические пропорции кадра
           imageSize: "2K",
         },
       },
