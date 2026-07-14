@@ -194,7 +194,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (С ЭКСПАНЕНЦИАЛЬНЫМ BACKOFF)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -334,7 +334,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
             lastErrorMsg = e.message;
             console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
             if (attempt < 3) {
-              // ИСПРАВЛЕНО: Применяем экспоненциальный бэкофф с джиттером
               const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
               await new Promise((resolve) => setTimeout(resolve, backoffDelay));
             }
@@ -428,7 +427,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (УМНАЯ ЗАЩИТА ОТ 429)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ПОМОДЕЛЬНЫЙ ТРЕКИНГ)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -512,7 +511,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               break;
             }
           } catch (e) {
-            /* Игнорируем ошибки чтения */
+            /* Игнорируем ошибки */
           }
         }
       }
@@ -539,7 +538,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       if (geminiUltraFolderId)
         geminiUltraSheetId = (
           await drive.files.list({
-            q: `'${geminiUltraFolderId}' in parents security and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
             fields: "files(id)",
           })
         ).data?.files?.[0]?.id;
@@ -658,6 +657,35 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
     if (stateFileId) {
       stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" })).data;
+
+      // ========================================================
+      // 🛠️ МОДИФИКАЦИЯ: УМНАЯ АВТО-НОРМАЛИЗАЦИЯ И СБРОС СТАРЫХ СТАТУСОВ
+      // ========================================================
+      let calculatedCompleted = 0;
+      if (stateData && stateData.progress) {
+        Object.keys(stateData.progress).forEach((id) => {
+          const t = stateData.progress[id];
+
+          // Если старый стейт не содержал помодельной карты — создаем её
+          if (!t.completedModels) {
+            t.completedModels = {
+              gpt: t.status === "completed", // Допускаем, что GPT успел отрендерить 25 штук
+              gemini: false,
+              gemini3: false,
+            };
+          }
+
+          // Строка считается завершенной ТОЛЬКО если ВСЕ три модели имеют true
+          if (t.completedModels.gpt && t.completedModels.gemini && t.completedModels.gemini3) {
+            t.status = "completed";
+            calculatedCompleted++;
+          } else if (t.status === "completed") {
+            // КЛЮЧЕВОЙ МОМЕНТ: сбрасываем лже-успешные строки обратно в pending для догенерации Gemini!
+            t.status = "pending";
+          }
+        });
+        stateData.completedCount = calculatedCompleted;
+      }
     } else {
       tasks.forEach((t) => {
         stateData.progress[t.id] = {
@@ -667,6 +695,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           startedAt: null,
           completedAt: null,
           errors: [],
+          completedModels: { gpt: false, gemini: false, gemini3: false }, // Чистая инициализация структуры
         };
       });
       stateFileId = (
@@ -681,7 +710,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     await sendSlackMessage(
       slackToken,
       channelId,
-      `⚙️ *Структура готова.* Начинаю параллельный рендеринг: *${stateData.totalCount}* промптов.\n📂 *Архив Диска:* ${dateFolderUrl}`,
+      `⚙ *Структура проверена.* Запускаю догенерацию пропущенных ИИ-моделей: *${stateData.totalCount}* строк.`,
       rootThreadTs,
     );
 
@@ -694,7 +723,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       try {
         task.status = "processing";
         task.startedAt = new Date().toISOString();
-        task.errors = [];
+        // Оставляем старые ошибки в массиве для истории, не очищаем жестко
         await updateStateFile(drive, stateFileId, stateData);
 
         const detectedRatio = parseAspectRatio(task.prompt);
@@ -704,9 +733,13 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         const enhancedPrompt = task.prompt.trim() + compositionAnchors;
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
+        // Параллельное выполнение потоков
         const results = await Promise.all([
           // Поток 1: OpenAI gpt-image-2
           (async () => {
+            // Если модель уже была успешно сгенерирована ранее — мгновенно пропускаем её!
+            if (task.completedModels?.gpt) return { success: true };
+
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
@@ -740,6 +773,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, gptSheetId, gptRow);
+                  task.completedModels.gpt = true; // Фиксируем изолированный успех
                   return { success: true };
                 }
                 throw new Error("No image data returned from OpenAI");
@@ -760,6 +794,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           // Поток 2: GEMINI IMAGEN 4 ULTRA
           (async () => {
+            // Если модель уже была успешно сгенерирована ранее — мгновенно пропускаем её!
+            if (task.completedModels?.gemini) return { success: true };
+
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
@@ -783,6 +820,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+                  task.completedModels.gemini = true; // Фиксируем изолированный успех
                   return { success: true };
                 }
                 throw new Error("No bytes returned from Imagen Ultra");
@@ -790,7 +828,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                 lastError = e;
                 console.error(`[Imagen Ultra Строка ${id} | Попытка ${attempt}]:`, e.message);
                 if (attempt < 3) {
-                  // ИСПРАВЛЕНО: Экспоненциальный бэкофф с джиттером для прохождения 429
                   const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
                   await new Promise((r) => setTimeout(r, backoffDelay));
                 }
@@ -804,6 +841,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           // Поток 3: GEMINI 3 PRO IMAGE
           (async () => {
+            // Если модель уже была успешно сгенерирована ранее — мгновенно пропускаем её!
+            if (task.completedModels?.gemini3) return { success: true };
+
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
@@ -827,6 +867,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+                  task.completedModels.gemini3 = true; // Фиксируем изолированный успех
                   return { success: true };
                 }
                 throw new Error("No bytes returned from Gemini 3 Pro");
@@ -834,7 +875,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                 lastError = e;
                 console.error(`[Gemini 3 Pro Строка ${id} | Попытка ${attempt}]:`, e.message);
                 if (attempt < 3) {
-                  // ИСПРАВЛЕНО: Экспоненциальный бэкофф с джиттером для прохождения 429
                   const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
                   await new Promise((r) => setTimeout(r, backoffDelay));
                 }
@@ -847,21 +887,21 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           })(),
         ]);
 
-        let rowSucceeded = false;
-        task.errors = [];
-
+        // Разбор ошибок текущей итерации кадра
         for (const res of results) {
-          if (res.success) rowSucceeded = true;
-          if (res.error) task.errors.push(res.error);
+          if (res.error && !task.errors.includes(res.error)) {
+            task.errors.push(res.error);
+          }
         }
 
         task.completedAt = new Date().toISOString();
 
-        if (rowSucceeded) {
+        // Строка считается успешной ТОЛЬКО если ВСЕ три модели теперь равны true
+        if (task.completedModels.gpt && task.completedModels.gemini && task.completedModels.gemini3) {
           task.status = "completed";
           stateData.completedCount++;
         } else {
-          task.status = "failed";
+          task.status = "failed"; // Процесс пойдет дальше, но на круге рестарта строка будет догенерирована
         }
       } catch (lineError) {
         console.error(`[Row Critical Error] Строка ${id}:`, lineError.message);
@@ -870,13 +910,13 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         task.errors.push(`Critical Exception: ${lineError.message}`);
       }
 
+      // Синхронизация стейта на Диск
       try {
         await updateStateFile(drive, stateFileId, stateData);
       } catch (e) {
         console.error("[State Saving Error]:", e.message);
       }
 
-      // ИСПРАВЛЕНО: Увеличиваем паузу до 4000 мс (4 секунды), чтобы не триггерить минутные лимиты Google IPM
       await new Promise((resolve) => setTimeout(resolve, 4000));
     }
 
@@ -893,7 +933,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     const finalSummaryText =
       `🏁 *Массовая тройная генерация завершена!*\n` +
       `• Всего промптов обработано: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк с изображениями: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `• Успешно закрыто строк с полным пакетом изображений: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
       `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
       `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
 
