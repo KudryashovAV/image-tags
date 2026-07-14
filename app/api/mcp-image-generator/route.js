@@ -277,13 +277,13 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               const startTime = performance.now();
               const dallEApiResponse = await openai.images.generate(
                 { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
-                { timeout: 60000 },
-              );
+                { timeout: 120000 },
+              ); // Увеличено до 120 сек
               const imageData = dallEApiResponse?.data?.[0];
 
               if (imageData?.url) {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000);
+                const timeoutId = setTimeout(() => controller.abort(), 60000); // Увеличено до 60 сек
                 const imgRes = await fetch(imageData.url, { signal: controller.signal });
                 clearTimeout(timeoutId);
                 imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
@@ -302,7 +302,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               break;
             } else if (currentModel === "gemini3") {
               modelNameTag = "GEMINI 3 PRO IMAGE";
-              // Защита от спама, если запускаются обе модели
               if (modelsToRun.includes("gemini")) await new Promise((r) => setTimeout(r, 6000));
               const startTime = performance.now();
               imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
@@ -344,7 +343,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (УМНАЯ ЗАЩИТА ОТ 429)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   const slackToken = process.env.SLACK_BOT_TOKEN;
@@ -750,14 +749,14 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                   const gptStartTime = performance.now();
                   const dallEApiResponse = await openai.images.generate(
                     { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
-                    { timeout: 60000 },
-                  );
+                    { timeout: 120000 },
+                  ); // Увеличено до 120 сек
                   const imageData = dallEApiResponse?.data?.[0];
                   let gptBase64;
 
                   if (imageData?.url) {
                     const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+                    const timeoutId = setTimeout(() => controller.abort(), 60000); // Увеличено до 60 сек
                     const imgRes = await fetch(imageData.url, { signal: controller.signal });
                     clearTimeout(timeoutId);
                     gptBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
@@ -786,11 +785,8 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 } catch (e) {
                   lastError = e;
                   await log(` ⚠ GPT Ошибка (Попытка ${attempt}/3): ${e.message}`);
-                  if (attempt < 3) {
-                    // Удлиненный таймаут для GPT
-                    const backoffDelay = attempt === 1 ? 15000 : 45000;
-                    await new Promise((r) => setTimeout(r, backoffDelay + Math.random() * 2000));
-                  }
+                  if (attempt < 3)
+                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 3000 + Math.random() * 1000));
                 }
               }
               return { success: false, error: `GPT-Image-2: ${lastError?.message || "Ошибка"}` };
@@ -838,11 +834,8 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 } catch (e) {
                   lastError = e;
                   await log(` ⚠ Gemini Ultra Ошибка (Попытка ${attempt}/3): ${e.message}`);
-                  if (attempt < 3) {
-                    // ИСПРАВЛЕНО: Защитный длительный бэкофф от 429
-                    const backoffDelay = attempt === 1 ? 15000 : 45000;
-                    await new Promise((r) => setTimeout(r, backoffDelay + Math.random() * 2000));
-                  }
+                  if (attempt < 3)
+                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 4000 + Math.random() * 1500));
                 }
               }
               return { success: false, error: `Imagen-Ultra: ${lastError?.message || "Ошибка"}` };
@@ -858,7 +851,6 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 return { success: true };
               }
 
-              // ИСПРАВЛЕНО: Сдвиг фазы на 6 секунд, чтобы не бить в API Gemini одновременно с Ultra
               if (modelsToRun.includes("gemini") && !task.completedModels?.gemini) {
                 await log(" -> Gemini 3 Pro: Жду 6 секунд для сдвига фазы (Anti-burst)...");
                 await new Promise((r) => setTimeout(r, 6000));
@@ -897,11 +889,8 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
                 } catch (e) {
                   lastError = e;
                   await log(` ⚠ Gemini 3 Pro Ошибка (Попытка ${attempt}/3): ${e.message}`);
-                  if (attempt < 3) {
-                    // ИСПРАВЛЕНО: Защитный длительный бэкофф от 429
-                    const backoffDelay = attempt === 1 ? 15000 : 45000;
-                    await new Promise((r) => setTimeout(r, backoffDelay + Math.random() * 2000));
-                  }
+                  if (attempt < 3)
+                    await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 4000 + Math.random() * 1500));
                 }
               }
               return { success: false, error: `Gemini-3-Pro: ${lastError?.message || "Ошибка"}` };
@@ -942,9 +931,7 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
         await log(`Ошибка сохранения state.json: ${e.message}`);
       }
 
-      // ИСПРАВЛЕНО: Увеличена базовая пауза между строками для защиты от лимитов (15 RPM)
-      await log("Ожидание 8 секунд перед следующей строкой...");
-      await new Promise((resolve) => setTimeout(resolve, 8000));
+      await new Promise((resolve) => setTimeout(resolve, 4000));
     }
 
     await log("Конвейер завершен. Запуск финальной стилизации таблиц...");
