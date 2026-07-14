@@ -162,7 +162,7 @@ export async function POST(request) {
       backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
 
       if (isSlack) {
-        const displayLabel = selectedModel === "all" ? "ВСЕ МОДЕЛИ" : selectedModel.toUpperCase().replace(/,/g, " + ");
+        const displayLabel = selectedModel === "all" ? "ВСЕ МОЕЛДИ" : selectedModel.toUpperCase().replace(/,/g, " + ");
         return NextResponse.json({
           response_type: "ephemeral",
           text: `⏳ *Запрос принят!* Стек моделей: \`${displayLabel}\`. Разворачиваю одиночный рендеринг в тред общего канала...`,
@@ -198,7 +198,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ПАРАЛЛЕЛЬНЫЕ ПОТОКИ)
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -224,10 +224,9 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
   const compositionAnchors =
     ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
-  const enhancedPrompt = prompt.trim() + compositionAnchors; // ИСПРАВЛЕНО: Добавлен trim() для чистоты
+  const enhancedPrompt = prompt.trim() + compositionAnchors;
 
   if (slackToken && channelId) {
-    // ИСПРАВЛЕНО: Убрана переменная currentModel (которой тут не было), вызывавшая краш
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
@@ -273,88 +272,90 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
     await sendSlackMessage(
       slackToken,
       channelId,
-      `🚀 База данных готова. Передаю задачу на рендеринг...`,
+      `🚀 База данных готова. Передаю задачу на параллельный рендеринг...`,
       rootThreadTs,
     );
 
-    // Внутри цикла уже определяем специфику для каждой модели
-    for (const currentModel of modelsToRun) {
-      let imageBase64 = null;
-      let durationStr = "Ошибка";
-      let modelNameTag = "ОШИБКА";
+    // МОДИФИКАЦИЯ: Запуск всех моделей в параллельных независимых потоках
+    await Promise.all(
+      modelsToRun.map(async (currentModel) => {
+        let imageBase64 = null;
+        let durationStr = "Ошибка";
+        let modelNameTag = "ОШИБКА";
 
-      const openaiTargetSize = mapOpenAiSize(detectedRatio);
-      const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
+        const openaiTargetSize = mapOpenAiSize(detectedRatio);
+        const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-      if (currentModel === "gpt") {
-        modelNameTag = "GPT-IMAGE-2";
-        const startTime = performance.now();
-        try {
-          const dallEApiResponse = await openai.images.generate({
-            model: "gpt-image-2",
-            prompt: strictPrompt,
-            size: openaiTargetSize,
-            quality: "high",
-          });
-          const imageData = dallEApiResponse?.data?.[0];
-          imageBase64 = imageData?.url
-            ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
-            : imageData?.b64_json;
+        if (currentModel === "gpt") {
+          modelNameTag = "GPT-IMAGE-2";
+          const startTime = performance.now();
+          try {
+            const dallEApiResponse = await openai.images.generate({
+              model: "gpt-image-2",
+              prompt: strictPrompt,
+              size: openaiTargetSize,
+              quality: "high",
+            });
+            const imageData = dallEApiResponse?.data?.[0];
+            imageBase64 = imageData?.url
+              ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
+              : imageData?.b64_json;
 
-          const endTime = performance.now();
-          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
-        } catch (e) {
-          console.error("[Single Worker GPT Error]:", e.message);
-          await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка GPT:* \`${e.message}\``, rootThreadTs);
-          continue;
+            const endTime = performance.now();
+            durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+          } catch (e) {
+            console.error("[Single Worker GPT Error]:", e.message);
+            await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка GPT:* \`${e.message}\``, rootThreadTs);
+            return;
+          }
+        } else if (currentModel === "gemini") {
+          modelNameTag = "IMAGEN 4 ULTRA";
+          const startTime = performance.now();
+          try {
+            imageBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
+            const endTime = performance.now();
+            durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+          } catch (e) {
+            console.error("[Single Worker Gemini Error]:", e.message);
+            await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini Ultra:* \`${e.message}\``, rootThreadTs);
+            return;
+          }
+        } else if (currentModel === "gemini3") {
+          modelNameTag = "GEMINI 3 PRO IMAGE";
+          const startTime = performance.now();
+          try {
+            imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
+            const endTime = performance.now();
+            durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+          } catch (e) {
+            console.error("[Single Worker Gemini 3 Error]:", e.message);
+            await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini 3 Pro:* \`${e.message}\``, rootThreadTs);
+            return;
+          }
         }
-      } else if (currentModel === "gemini") {
-        modelNameTag = "IMAGEN 4 ULTRA";
-        const startTime = performance.now();
-        try {
-          imageBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
-          const endTime = performance.now();
-          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
-        } catch (e) {
-          console.error("[Single Worker Gemini Error]:", e.message);
-          await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini Ultra:* \`${e.message}\``, rootThreadTs);
-          continue;
+
+        if (imageBase64) {
+          const now = new Date();
+          const pad = (n) => String(n).padStart(2, "0");
+          const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+          const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
+
+          const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
+
+          const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
+          await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
+
+          const intermediateMsg =
+            `✅ *Генерация через ${modelNameTag} завершена!*\n` +
+            `• Время рендеринга: *${durationStr}*\n` +
+            `👉 *Ссылка на High-Res:* ${fileUrl}`;
+
+          await sendSlackMessage(slackToken, channelId, intermediateMsg, rootThreadTs);
         }
-      } else if (currentModel === "gemini3") {
-        modelNameTag = "GEMINI 3 PRO IMAGE";
-        const startTime = performance.now();
-        try {
-          imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
-          const endTime = performance.now();
-          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
-        } catch (e) {
-          console.error("[Single Worker Gemini 3 Error]:", e.message);
-          await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini 3 Pro:* \`${e.message}\``, rootThreadTs);
-          continue;
-        }
-      }
+      }),
+    );
 
-      if (imageBase64) {
-        const now = new Date();
-        const pad = (n) => String(n).padStart(2, "0");
-        const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-        const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
-
-        const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
-
-        const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
-        await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
-
-        const intermediateMsg =
-          `✅ *Генерация через ${modelNameTag} завершена!*\n` +
-          `• Время рендеринга: *${durationStr}*\n` +
-          `👉 *Ссылка на High-Res:* ${fileUrl}`;
-
-        await sendSlackMessage(slackToken, channelId, intermediateMsg, rootThreadTs);
-      }
-    }
-
-    const finalSuccessMsg = `🏁 *Одиночная сессия полностью завершена!* Все результаты занесены в общую таблицу логов папки \`${SINGLE_PROMPT_FOLDER_ID}\`.`;
+    const finalSuccessMsg = `🏁 *Одиночная параллельная сессия полностью завершена!* Все результаты внесены в общую таблицу логов.`;
     await sendSlackMessage(slackToken, channelId, finalSuccessMsg, rootThreadTs);
   } catch (error) {
     console.error("[Single Worker Error]:", error.message);
@@ -416,7 +417,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ПАРАЛЛЕЛЬНЫЕ ПОТОКИ МОДЕЛЕЙ)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -427,7 +428,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
-      `🚀 *Запуск массовой High-Res генерации изображений по списку (3 ИИ-модели)!*\n` +
+      `🚀 *Запуск массовой High-Res генерации изображений по списку (3 параллельных потока ИИ)!*\n` +
         `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
         `🛠️ Разворачиваю тройную структуру каталогов на Google Диске...`,
     );
@@ -525,7 +526,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         fields: "files(id, name)",
       });
 
-      // ИСПРАВЛЕНО: Безопасное присвоение, чтобы избежать краша, если папки удалены вручную
       subfolders.data?.files?.forEach((f) => {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
@@ -694,110 +694,117 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         const detectedRatio = parseAspectRatio(task.prompt);
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
 
-        // КЛИНИЧЕСКИЕ АНТИ-ТИЛТ И КОМПОЗИЦИОННЫЕ ЯКОРЯ ДЛЯ НЕЙРОСЕТИ
         const compositionAnchors =
           ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
         const enhancedPrompt = task.prompt.trim() + compositionAnchors;
-
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        // --- 1. OpenAI gpt-image-2 ---
-        let gptFileUrl = "Ошибка";
-        let gptDurationStr = "Ошибка";
-        try {
-          const gptStartTime = performance.now();
-          const dallEApiResponse = await openai.images.generate({
-            model: "gpt-image-2",
-            prompt: strictPrompt,
-            size: openaiTargetSize,
-            quality: "high",
-          });
-          const imageData = dallEApiResponse?.data?.[0];
-          let gptBase64 = imageData?.url
-            ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
-            : imageData?.b64_json;
+        // МОДИФИКАЦИЯ: Разделение генерации текущей строки на 3 параллельных асинхронных потока
+        await Promise.all([
+          // Поток 1: OpenAI gpt-image-2
+          (async () => {
+            let gptFileUrl = "Ошибка";
+            let gptDurationStr = "Ошибка";
+            try {
+              const gptStartTime = performance.now();
+              const dallEApiResponse = await openai.images.generate({
+                model: "gpt-image-2",
+                prompt: strictPrompt,
+                size: openaiTargetSize,
+                quality: "high",
+              });
+              const imageData = dallEApiResponse?.data?.[0];
+              let gptBase64 = imageData?.url
+                ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
+                : imageData?.b64_json;
 
-          const gptEndTime = performance.now();
-          gptDurationStr = `${((gptEndTime - gptStartTime) / 1000).toFixed(2)} сек`;
+              const gptEndTime = performance.now();
+              gptDurationStr = `${((gptEndTime - gptStartTime) / 1000).toFixed(2)} сек`;
 
-          if (gptBase64) {
-            gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
-            const gptRow = [
-              task.cellUrl,
-              `=IMAGE("${gptFileUrl}")`,
-              gptFileUrl,
-              gptDurationStr,
-              "GPT-IMAGE-2",
-              task.prompt,
-            ];
-            await appendRowOnly(sheets, gptSheetId, gptRow);
-            rowSucceeded = true;
-          }
-        } catch (e) {
-          console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
-        }
+              if (gptBase64) {
+                gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
+                const gptRow = [
+                  task.cellUrl,
+                  `=IMAGE("${gptFileUrl}")`,
+                  gptFileUrl,
+                  gptDurationStr,
+                  "GPT-IMAGE-2",
+                  task.prompt,
+                ];
+                await appendRowOnly(sheets, gptSheetId, gptRow);
+                rowSucceeded = true;
+              }
+            } catch (e) {
+              console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
+            }
+          })(),
 
-        // --- 2. GEMINI IMAGEN 4 ULTRA ---
-        let geminiFileUrl = "Ошибка";
-        let geminiDurationStr = "Ошибка";
-        try {
-          const geminiStartTime = performance.now();
-          const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
-          const geminiEndTime = performance.now();
-          geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
+          // Поток 2: GEMINI IMAGEN 4 ULTRA
+          (async () => {
+            let geminiFileUrl = "Ошибка";
+            let geminiDurationStr = "Ошибка";
+            try {
+              const geminiStartTime = performance.now();
+              const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
+              const geminiEndTime = performance.now();
+              geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
 
-          if (imagenBase64) {
-            geminiFileUrl = await uploadBase64ToDrive(
-              drive,
-              imagenBase64,
-              `gemini_ultra_art_${id}.png`,
-              geminiUltraFolderId,
-            );
-            const geminiRow = [
-              task.cellUrl,
-              `=IMAGE("${geminiFileUrl}")`,
-              geminiFileUrl,
-              geminiDurationStr,
-              "IMAGEN 4 ULTRA",
-              task.prompt,
-            ];
-            await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
-            rowSucceeded = true;
-          }
-        } catch (e) {
-          console.error(`[Imagen Ultra Error] Строка ${id}:`, e.message);
-        }
+              if (imagenBase64) {
+                geminiFileUrl = await uploadBase64ToDrive(
+                  drive,
+                  imagenBase64,
+                  `gemini_ultra_art_${id}.png`,
+                  geminiUltraFolderId,
+                );
+                const geminiRow = [
+                  task.cellUrl,
+                  `=IMAGE("${geminiFileUrl}")`,
+                  geminiFileUrl,
+                  geminiDurationStr,
+                  "IMAGEN 4 ULTRA",
+                  task.prompt,
+                ];
+                await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+                rowSucceeded = true;
+              }
+            } catch (e) {
+              console.error(`[Imagen Ultra Error] Строка ${id}:`, e.message);
+            }
+          })(),
 
-        // --- 3. GEMINI 3 PRO IMAGE ---
-        let gemini3FileUrl = "Ошибка";
-        let gemini3DurationStr = "Ошибка";
-        try {
-          const gemini3StartTime = performance.now();
-          const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
-          const gemini3EndTime = performance.now();
-          gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
+          // Поток 3: GEMINI 3 PRO IMAGE
+          (async () => {
+            let gemini3FileUrl = "Ошибка";
+            let gemini3DurationStr = "Ошибка";
+            try {
+              const gemini3StartTime = performance.now();
+              const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
+              const gemini3EndTime = performance.now();
+              gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
-          if (gemini3Base64) {
-            gemini3FileUrl = await uploadBase64ToDrive(
-              drive,
-              gemini3Base64,
-              `gemini3_pro_art_${id}.png`,
-              gemini3FolderId,
-            );
-            const gemini3Row = [
-              task.cellUrl,
-              `=IMAGE("${gemini3FileUrl}")`,
-              gemini3FileUrl,
-              gemini3DurationStr,
-              "GEMINI 3 PRO IMAGE",
-              task.prompt,
-            ];
-            await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
-            rowSucceeded = true;
-          }
-        } catch (e) {
-          console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
-        }
+              if (gemini3Base64) {
+                gemini3FileUrl = await uploadBase64ToDrive(
+                  drive,
+                  gemini3Base64,
+                  `gemini3_pro_art_${id}.png`,
+                  gemini3FolderId,
+                );
+                const gemini3Row = [
+                  task.cellUrl,
+                  `=IMAGE("${gemini3FileUrl}")`,
+                  gemini3FileUrl,
+                  gemini3DurationStr,
+                  "GEMINI 3 PRO IMAGE",
+                  task.prompt,
+                ];
+                await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+                rowSucceeded = true;
+              }
+            } catch (e) {
+              console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
+            }
+          })(),
+        ]);
 
         if (rowSucceeded) {
           task.status = "completed";
@@ -824,7 +831,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
     console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию интерфейсов таблиц...");
 
-    // ИСПРАВЛЕНО: Защита стилизации, если таблицы не создались
     if (gptSheetId && geminiUltraSheetId && gemini3SheetId) {
       await Promise.all([
         finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
@@ -863,7 +869,6 @@ async function appendRowOnly(sheets, spreadsheetId, rowValues) {
       requestBody: { values: [rowValues] },
     });
   } catch (error) {
-    // Защита от падения: логируем, но не даем рухнуть всей сессии из-за одной строки
     console.error(`[Append Row Error] Не удалось записать лог в таблицу ${spreadsheetId}:`, error.message);
   }
 }
