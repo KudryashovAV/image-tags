@@ -194,7 +194,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (С 3-КРАТНЫМ ПОВТОРОМ)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (С ЭКСПАНЕНЦИАЛЬНЫМ BACKOFF)
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -282,14 +282,12 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        // ЦИКЛ НА 3 ПОПЫТКИ
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             if (currentModel === "gpt") {
               modelNameTag = "GPT-IMAGE-2";
               const startTime = performance.now();
 
-              // ИСПРАВЛЕНО: timeout перенесен во второй аргумент (Request Options)
               const dallEApiResponse = await openai.images.generate(
                 {
                   model: "gpt-image-2",
@@ -335,7 +333,11 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           } catch (e) {
             lastErrorMsg = e.message;
             console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
-            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 2000));
+            if (attempt < 3) {
+              // ИСПРАВЛЕНО: Применяем экспоненциальный бэкофф с джиттером
+              const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
+              await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+            }
           }
         }
 
@@ -426,7 +428,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (С 3-КРАТНЫМ ПОВТОРОМ)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (УМНАЯ ЗАЩИТА ОТ 429)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -445,9 +447,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     const { drive, sheets } = await getGoogleAuth();
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
 
-    if (!rootFolderId || rootFolderId === "undefined") {
+    if (!rootFolderId || rootFolderId === "undefined")
       throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env");
-    }
 
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
     const firstSheetName = metadata.data.sheets[0].properties.title;
@@ -511,7 +512,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               break;
             }
           } catch (e) {
-            /* Игнорируем ошибки чтения чужого стейта */
+            /* Игнорируем ошибки чтения */
           }
         }
       }
@@ -538,7 +539,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       if (geminiUltraFolderId)
         geminiUltraSheetId = (
           await drive.files.list({
-            q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            q: `'${geminiUltraFolderId}' in parents security and mimeType = 'application/vnd.google-apps.spreadsheet'`,
             fields: "files(id)",
           })
         ).data?.files?.[0]?.id;
@@ -680,7 +681,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     await sendSlackMessage(
       slackToken,
       channelId,
-      `⚙️ *Структура готова.* Начинаю рендеринг: *${stateData.totalCount}* промптов.\n📂 *Архив Диска:* ${dateFolderUrl}`,
+      `⚙️ *Структура готова.* Начинаю параллельный рендеринг: *${stateData.totalCount}* промптов.\n📂 *Архив Диска:* ${dateFolderUrl}`,
       rootThreadTs,
     );
 
@@ -710,20 +711,10 @@ async function backgroundProcessor(spreadsheetId, channelId) {
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 const gptStartTime = performance.now();
-
-                // ИСПРАВЛЕНО: timeout перенесен во второй аргумент (Request Options)
                 const dallEApiResponse = await openai.images.generate(
-                  {
-                    model: "gpt-image-2",
-                    prompt: strictPrompt,
-                    size: openaiTargetSize,
-                    quality: "high",
-                  },
-                  {
-                    timeout: 60000,
-                  },
+                  { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
+                  { timeout: 60000 },
                 );
-
                 const imageData = dallEApiResponse?.data?.[0];
                 let gptBase64;
 
@@ -755,7 +746,10 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               } catch (e) {
                 lastError = e;
                 console.error(`[GPT-Image Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000)); // Ждем 2 сек и повторяем
+                if (attempt < 3) {
+                  const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
+                  await new Promise((r) => setTimeout(r, backoffDelay));
+                }
               }
             }
             return {
@@ -795,7 +789,11 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               } catch (e) {
                 lastError = e;
                 console.error(`[Imagen Ultra Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+                if (attempt < 3) {
+                  // ИСПРАВЛЕНО: Экспоненциальный бэкофф с джиттером для прохождения 429
+                  const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
+                  await new Promise((r) => setTimeout(r, backoffDelay));
+                }
               }
             }
             return {
@@ -835,7 +833,11 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               } catch (e) {
                 lastError = e;
                 console.error(`[Gemini 3 Pro Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+                if (attempt < 3) {
+                  // ИСПРАВЛЕНО: Экспоненциальный бэкофф с джиттером для прохождения 429
+                  const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
+                  await new Promise((r) => setTimeout(r, backoffDelay));
+                }
               }
             }
             return {
@@ -868,14 +870,14 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         task.errors.push(`Critical Exception: ${lineError.message}`);
       }
 
-      // Сохраняем стейт в Google Drive после каждой строки для 100% контроля
       try {
         await updateStateFile(drive, stateFileId, stateData);
       } catch (e) {
         console.error("[State Saving Error]:", e.message);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // ИСПРАВЛЕНО: Увеличиваем паузу до 4000 мс (4 секунды), чтобы не триггерить минутные лимиты Google IPM
+      await new Promise((resolve) => setTimeout(resolve, 4000));
     }
 
     console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию...");
