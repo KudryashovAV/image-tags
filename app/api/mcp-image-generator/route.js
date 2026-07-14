@@ -162,7 +162,7 @@ export async function POST(request) {
       backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
 
       if (isSlack) {
-        const displayLabel = selectedModel === "all" ? "ВСЕ МОЕЛДИ" : selectedModel.toUpperCase().replace(/,/g, " + ");
+        const displayLabel = selectedModel === "all" ? "ВСЕ МОДЕЛИ" : selectedModel.toUpperCase().replace(/,/g, " + ");
         return NextResponse.json({
           response_type: "ephemeral",
           text: `⏳ *Запрос принят!* Стек моделей: \`${displayLabel}\`. Разворачиваю одиночный рендеринг в тред общего канала...`,
@@ -198,7 +198,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ПАРАЛЛЕЛЬНЫЕ ПОТОКИ)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -276,7 +276,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       rootThreadTs,
     );
 
-    // МОДИФИКАЦИЯ: Запуск всех моделей в параллельных независимых потоках
     await Promise.all(
       modelsToRun.map(async (currentModel) => {
         let imageBase64 = null;
@@ -295,11 +294,19 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
               prompt: strictPrompt,
               size: openaiTargetSize,
               quality: "high",
+              timeout: 60000, // Явный таймаут для OpenAI
             });
             const imageData = dallEApiResponse?.data?.[0];
-            imageBase64 = imageData?.url
-              ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
-              : imageData?.b64_json;
+
+            if (imageData?.url) {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 30000);
+              const imgRes = await fetch(imageData.url, { signal: controller.signal });
+              clearTimeout(timeoutId);
+              imageBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+            } else {
+              imageBase64 = imageData?.b64_json;
+            }
 
             const endTime = performance.now();
             durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
@@ -417,7 +424,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ПАРАЛЛЕЛЬНЫЕ ПОТОКИ МОДЕЛЕЙ)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -450,24 +457,14 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     const rows = sheetData.data.values || [];
 
     if (rows.length <= 1) {
-      await sendSlackMessage(
-        slackToken,
-        channelId,
-        `❌ *Ошибка отмены:* Указанная таблица-донор \`${spreadsheetId}\` пуста.`,
-        rootThreadTs,
-      );
+      await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Указанная таблица-донор пуста.`, rootThreadTs);
       return;
     }
 
     const header = rows[0];
     const promptColIndex = header.findIndex((h) => h.trim() === "Промт для воссоздания");
     if (promptColIndex === -1) {
-      await sendSlackMessage(
-        slackToken,
-        channelId,
-        `❌ *Ошибка отмены:* Колонка "Промт для воссоздания" не найдена в таблице \`${spreadsheetId}\`.`,
-        rootThreadTs,
-      );
+      await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Колонка "Промт" не найдена.`, rootThreadTs);
       return;
     }
     const promptColLetter = columnToLetter(promptColIndex + 1);
@@ -487,8 +484,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       fields: "files(id, webViewLink)",
     });
 
-    let dateFolderId, dateFolderUrl;
-    let stateFileId = null;
+    let dateFolderId,
+      dateFolderUrl,
+      stateFileId = null;
     let gptFolderId, geminiUltraFolderId, gemini3FolderId;
     let gptSheetId, geminiUltraSheetId, gemini3SheetId;
     let isResuming = false;
@@ -505,7 +503,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           try {
             const response = await drive.files.get({ fileId: potentialStateId, alt: "media" });
             const potentialState = response.data;
-
             if (potentialState && potentialState.spreadsheetId === spreadsheetId) {
               dateFolderId = folder.id;
               dateFolderUrl = folder.webViewLink;
@@ -514,7 +511,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               break;
             }
           } catch (e) {
-            console.error("[State Check Error]: Can't read state file, skipping folder.", e.message);
+            /* Игнорируем ошибки чтения чужого стейта */
           }
         }
       }
@@ -525,7 +522,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         q: `'${dateFolderId}' in parents and trashed = false`,
         fields: "files(id, name)",
       });
-
       subfolders.data?.files?.forEach((f) => {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
@@ -663,7 +659,15 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" })).data;
     } else {
       tasks.forEach((t) => {
-        stateData.progress[t.id] = { status: "pending", prompt: t.prompt, cellUrl: t.cellUrl };
+        // ДОБАВЛЕНО: Расширенная структура логов с датами и массивом ошибок
+        stateData.progress[t.id] = {
+          status: "pending",
+          prompt: t.prompt,
+          cellUrl: t.cellUrl,
+          startedAt: null,
+          completedAt: null,
+          errors: [],
+        };
       });
       stateFileId = (
         await drive.files.create({
@@ -677,34 +681,35 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     await sendSlackMessage(
       slackToken,
       channelId,
-      `⚙️ *Структура развернута:* Промптов в работе: *${stateData.totalCount}*.\n📂 *Рабочий архив Диска:* ${dateFolderUrl}\n🛸 Включаю нейросети, запускаю параллельный рендеринг через GPT, Imagen Ultra и Gemini 3 Pro...`,
+      `⚙️ *Структура готова.* Начинаю рендеринг: *${stateData.totalCount}* промптов.\n📂 *Архив Диска:* ${dateFolderUrl}`,
       rootThreadTs,
     );
 
     const taskIds = Object.keys(stateData.progress);
+
     for (const id of taskIds) {
       const task = stateData.progress[id];
-      if (task.status === "completed" || task.status === "failed") continue;
-
-      let rowSucceeded = false;
+      // ДОБАВЛЕНО: Безопасный рестарт. Если скрипт упал на 'processing' или 'failed', он попробует снова.
+      if (task.status === "completed") continue;
 
       try {
+        // 1. ФИКСАЦИЯ СТАРТА
         task.status = "processing";
+        task.startedAt = new Date().toISOString();
+        task.errors = [];
+        await updateStateFile(drive, stateFileId, stateData);
 
         const detectedRatio = parseAspectRatio(task.prompt);
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
-
         const compositionAnchors =
           ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
         const enhancedPrompt = task.prompt.trim() + compositionAnchors;
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        // МОДИФИКАЦИЯ: Разделение генерации текущей строки на 3 параллельных асинхронных потока
-        await Promise.all([
+        // 2. ПАРАЛЛЕЛЬНЫЕ ПОТОКИ С ПЕРЕХВАТОМ ОШИБОК
+        const results = await Promise.all([
           // Поток 1: OpenAI gpt-image-2
           (async () => {
-            let gptFileUrl = "Ошибка";
-            let gptDurationStr = "Ошибка";
             try {
               const gptStartTime = performance.now();
               const dallEApiResponse = await openai.images.generate({
@@ -712,17 +717,25 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                 prompt: strictPrompt,
                 size: openaiTargetSize,
                 quality: "high",
+                timeout: 60000,
               });
               const imageData = dallEApiResponse?.data?.[0];
-              let gptBase64 = imageData?.url
-                ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
-                : imageData?.b64_json;
+              let gptBase64;
 
-              const gptEndTime = performance.now();
-              gptDurationStr = `${((gptEndTime - gptStartTime) / 1000).toFixed(2)} сек`;
+              if (imageData?.url) {
+                // ДОБАВЛЕНО: Таймаут на скачивание картинки
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
+                const imgRes = await fetch(imageData.url, { signal: controller.signal });
+                clearTimeout(timeoutId);
+                gptBase64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+              } else {
+                gptBase64 = imageData?.b64_json;
+              }
 
+              const gptDurationStr = `${((performance.now() - gptStartTime) / 1000).toFixed(2)} сек`;
               if (gptBase64) {
-                gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
+                const gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
                 const gptRow = [
                   task.cellUrl,
                   `=IMAGE("${gptFileUrl}")`,
@@ -732,25 +745,23 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                   task.prompt,
                 ];
                 await appendRowOnly(sheets, gptSheetId, gptRow);
-                rowSucceeded = true;
+                return { success: true };
               }
+              throw new Error("No image data returned from OpenAI");
             } catch (e) {
-              console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
+              return { success: false, error: `GPT-Image-2: ${e.message}` };
             }
           })(),
 
           // Поток 2: GEMINI IMAGEN 4 ULTRA
           (async () => {
-            let geminiFileUrl = "Ошибка";
-            let geminiDurationStr = "Ошибка";
             try {
               const geminiStartTime = performance.now();
               const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
-              const geminiEndTime = performance.now();
-              geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
+              const geminiDurationStr = `${((performance.now() - geminiStartTime) / 1000).toFixed(2)} сек`;
 
               if (imagenBase64) {
-                geminiFileUrl = await uploadBase64ToDrive(
+                const geminiFileUrl = await uploadBase64ToDrive(
                   drive,
                   imagenBase64,
                   `gemini_ultra_art_${id}.png`,
@@ -765,25 +776,23 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                   task.prompt,
                 ];
                 await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
-                rowSucceeded = true;
+                return { success: true };
               }
+              throw new Error("No bytes returned from Imagen Ultra");
             } catch (e) {
-              console.error(`[Imagen Ultra Error] Строка ${id}:`, e.message);
+              return { success: false, error: `Imagen-Ultra: ${e.message}` };
             }
           })(),
 
           // Поток 3: GEMINI 3 PRO IMAGE
           (async () => {
-            let gemini3FileUrl = "Ошибка";
-            let gemini3DurationStr = "Ошибка";
             try {
               const gemini3StartTime = performance.now();
               const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
-              const gemini3EndTime = performance.now();
-              gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
+              const gemini3DurationStr = `${((performance.now() - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
               if (gemini3Base64) {
-                gemini3FileUrl = await uploadBase64ToDrive(
+                const gemini3FileUrl = await uploadBase64ToDrive(
                   drive,
                   gemini3Base64,
                   `gemini3_pro_art_${id}.png`,
@@ -798,13 +807,25 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                   task.prompt,
                 ];
                 await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
-                rowSucceeded = true;
+                return { success: true };
               }
+              throw new Error("No bytes returned from Gemini 3 Pro");
             } catch (e) {
-              console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
+              return { success: false, error: `Gemini-3-Pro: ${e.message}` };
             }
           })(),
         ]);
+
+        // 3. АНАЛИЗ РЕЗУЛЬТАТОВ ПОТОКОВ
+        let rowSucceeded = false;
+        task.errors = [];
+
+        for (const res of results) {
+          if (res.success) rowSucceeded = true;
+          if (res.error) task.errors.push(res.error);
+        }
+
+        task.completedAt = new Date().toISOString();
 
         if (rowSucceeded) {
           task.status = "completed";
@@ -813,23 +834,23 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           task.status = "failed";
         }
       } catch (lineError) {
-        console.error(`[Row Critical Error] Ошибка обработки строки ${id}:`, lineError.message);
+        console.error(`[Row Critical Error] Строка ${id}:`, lineError.message);
         task.status = "failed";
+        task.completedAt = new Date().toISOString();
+        task.errors.push(`Critical Exception: ${lineError.message}`);
       }
 
-      const currentIdx = taskIds.indexOf(id) + 1;
-      if (currentIdx % 5 === 0 || currentIdx === taskIds.length) {
-        try {
-          await updateStateFile(drive, stateFileId, stateData);
-        } catch (e) {
-          console.error("[State Throttling Error]: Временная задержка сохранения стейта на Диск.", e.message);
-        }
+      // 4. ФИКСАЦИЯ РЕЗУЛЬТАТА: Теперь сохраняем стейт в Google Drive после каждой строки
+      try {
+        await updateStateFile(drive, stateFileId, stateData);
+      } catch (e) {
+        console.error("[State Saving Error]:", e.message);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 500)); // Пауза передышки
     }
 
-    console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию интерфейсов таблиц...");
+    console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию...");
 
     if (gptSheetId && geminiUltraSheetId && gemini3SheetId) {
       await Promise.all([
@@ -898,60 +919,74 @@ async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
 }
 
 // ========================================================
-// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ (ПРИНИМАЮТ aspect_ratio)
+// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ (С ТАЙМАУТАМИ)
 // ========================================================
 async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
-  const modelName = "imagen-4.0-ultra-generate-001";
-  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
+  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:predict?key=${apiKey}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      instances: [{ prompt: clientPrompt }],
-      parameters: {
-        sampleCount: 1,
-        aspectRatio: aspectRatio,
-        imageSize: "2K",
-        outputMimeType: "image/png",
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд жесткий таймаут
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-ultra-generate-001:predict?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          instances: [{ prompt: clientPrompt }],
+          parameters: { sampleCount: 1, aspectRatio: aspectRatio, imageSize: "2K", outputMimeType: "image/png" },
+        }),
       },
-    }),
-  });
+    );
+    clearTimeout(timeoutId);
 
-  if (!response.ok) throw new Error(`Google Imagen API Error: ${response.statusText}`);
-  const data = await response.json();
-  const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
-  if (!base64Image) throw new Error("Imagen 4 Ultra API не вернул байты.");
-  return base64Image;
+    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+    const data = await response.json();
+    const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
+    if (!base64Image) throw new Error("No bytes returned.");
+    return base64Image;
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") throw new Error("Request timed out after 60 seconds.");
+    throw e;
+  }
 }
 
 async function generateGemini3ProImage(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
-  const modelName = "gemini-3-pro-image";
-  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
+  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: clientPrompt }] }],
-      generationConfig: {
-        imageConfig: {
-          aspectRatio: aspectRatio,
-          imageSize: "2K",
-        },
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд жесткий таймаут
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: clientPrompt }] }],
+          generationConfig: { imageConfig: { aspectRatio: aspectRatio, imageSize: "2K" } },
+        }),
       },
-    }),
-  });
+    );
+    clearTimeout(timeoutId);
 
-  if (!response.ok) throw new Error(`Google Gemini 3 Pro Image API Error: ${response.statusText}`);
-  const data = await response.json();
-  const base64Image = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Image) throw new Error("Gemini 3 Pro Image API не вернул байты.");
-  return base64Image;
+    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+    const data = await response.json();
+    const base64Image = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Image) throw new Error("No bytes returned.");
+    return base64Image;
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") throw new Error("Request timed out after 60 seconds.");
+    throw e;
+  }
 }
 
 async function uploadBase64ToDrive(drive, base64Data, filename, parentFolderId) {
