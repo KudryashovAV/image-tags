@@ -100,7 +100,7 @@ function mapOpenAiSize(ratio) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (С УМНЫМ КВАТЕРНЫМ ПАРСЕРОМ)
 // ========================================================
 export async function POST(request) {
   try {
@@ -125,12 +125,14 @@ export async function POST(request) {
       }
 
       const args = {};
-      const argRegex = /([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"/g;
+      // ИСПРАВЛЕНО: Регулярное выражение теперь поддерживает как прямые кавычки "", так и фигурные кавычки Slack “”, ””, ‘’, ’’
+      const argRegex = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|“([^”]*)[”"“]|‘([^’]*)[’'‘]|(\S+))/g;
       let match;
 
       while ((match = argRegex.exec(slackText)) !== null) {
         const key = match[1].toLowerCase();
-        const value = match[2].trim();
+        // Извлекаем значение из группы, которая реально сматчилась
+        const value = (match[2] || match[3] || match[4] || match[5] || match[6] || "").trim();
         args[key] = value;
       }
 
@@ -658,29 +660,23 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     if (stateFileId) {
       stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" })).data;
 
-      // ========================================================
-      // 🛠️ МОДИФИКАЦИЯ: УМНАЯ АВТО-НОРМАЛИЗАЦИЯ И СБРОС СТАРЫХ СТАТУСОВ
-      // ========================================================
       let calculatedCompleted = 0;
       if (stateData && stateData.progress) {
         Object.keys(stateData.progress).forEach((id) => {
           const t = stateData.progress[id];
 
-          // Если старый стейт не содержал помодельной карты — создаем её
           if (!t.completedModels) {
             t.completedModels = {
-              gpt: t.status === "completed", // Допускаем, что GPT успел отрендерить 25 штук
+              gpt: t.status === "completed",
               gemini: false,
               gemini3: false,
             };
           }
 
-          // Строка считается завершенной ТОЛЬКО если ВСЕ три модели имеют true
           if (t.completedModels.gpt && t.completedModels.gemini && t.completedModels.gemini3) {
             t.status = "completed";
             calculatedCompleted++;
           } else if (t.status === "completed") {
-            // КЛЮЧЕВОЙ МОМЕНТ: сбрасываем лже-успешные строки обратно в pending для догенерации Gemini!
             t.status = "pending";
           }
         });
@@ -695,7 +691,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           startedAt: null,
           completedAt: null,
           errors: [],
-          completedModels: { gpt: false, gemini: false, gemini3: false }, // Чистая инициализация структуры
+          completedModels: { gpt: false, gemini: false, gemini3: false },
         };
       });
       stateFileId = (
@@ -723,7 +719,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       try {
         task.status = "processing";
         task.startedAt = new Date().toISOString();
-        // Оставляем старые ошибки в массиве для истории, не очищаем жестко
         await updateStateFile(drive, stateFileId, stateData);
 
         const detectedRatio = parseAspectRatio(task.prompt);
@@ -733,11 +728,9 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         const enhancedPrompt = task.prompt.trim() + compositionAnchors;
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        // Параллельное выполнение потоков
         const results = await Promise.all([
           // Поток 1: OpenAI gpt-image-2
           (async () => {
-            // Если модель уже была успешно сгенерирована ранее — мгновенно пропускаем её!
             if (task.completedModels?.gpt) return { success: true };
 
             let lastError = null;
@@ -773,7 +766,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, gptSheetId, gptRow);
-                  task.completedModels.gpt = true; // Фиксируем изолированный успех
+                  task.completedModels.gpt = true;
                   return { success: true };
                 }
                 throw new Error("No image data returned from OpenAI");
@@ -794,7 +787,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           // Поток 2: GEMINI IMAGEN 4 ULTRA
           (async () => {
-            // Если модель уже была успешно сгенерирована ранее — мгновенно пропускаем её!
             if (task.completedModels?.gemini) return { success: true };
 
             let lastError = null;
@@ -820,7 +812,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
-                  task.completedModels.gemini = true; // Фиксируем изолированный успех
+                  task.completedModels.gemini = true;
                   return { success: true };
                 }
                 throw new Error("No bytes returned from Imagen Ultra");
@@ -841,7 +833,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           // Поток 3: GEMINI 3 PRO IMAGE
           (async () => {
-            // Если модель уже была успешно сгенерирована ранее — мгновенно пропускаем её!
             if (task.completedModels?.gemini3) return { success: true };
 
             let lastError = null;
@@ -867,7 +858,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
-                  task.completedModels.gemini3 = true; // Фиксируем изолированный успех
+                  task.completedModels.gemini3 = true;
                   return { success: true };
                 }
                 throw new Error("No bytes returned from Gemini 3 Pro");
@@ -887,7 +878,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           })(),
         ]);
 
-        // Разбор ошибок текущей итерации кадра
         for (const res of results) {
           if (res.error && !task.errors.includes(res.error)) {
             task.errors.push(res.error);
@@ -896,12 +886,11 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
         task.completedAt = new Date().toISOString();
 
-        // Строка считается успешной ТОЛЬКО если ВСЕ три модели теперь равны true
         if (task.completedModels.gpt && task.completedModels.gemini && task.completedModels.gemini3) {
           task.status = "completed";
           stateData.completedCount++;
         } else {
-          task.status = "failed"; // Процесс пойдет дальше, но на круге рестарта строка будет догенерирована
+          task.status = "failed";
         }
       } catch (lineError) {
         console.error(`[Row Critical Error] Строка ${id}:`, lineError.message);
@@ -910,7 +899,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         task.errors.push(`Critical Exception: ${lineError.message}`);
       }
 
-      // Синхронизация стейта на Диск
       try {
         await updateStateFile(drive, stateFileId, stateData);
       } catch (e) {
