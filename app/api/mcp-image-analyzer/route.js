@@ -8,7 +8,7 @@ const openai = new OpenAI({
 
 const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
 
-// Нативная функция отправки сообщений в Slack через Токен (Возвращает объект с деталями)
+// Нативная функция отправки сообщений в Slack через Токен
 async function sendSlackMessage(channel, text, threadTs = null) {
   const token = process.env.SLACK_BOT_TOKEN;
   if (!token) {
@@ -118,14 +118,19 @@ export async function POST(request) {
         folderId = slackText.substring(0, firstSpaceIndex).trim();
         const remainingArgs = slackText.substring(firstSpaceIndex).trim();
 
-        const regex = /(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
+        // ИСПРАВЛЕНО: Регулярное выражение теперь поддерживает как прямые кавычки "", так и фигурные кавычки Slack “”, ””, ‘’, ’’
+        const regex = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|“([^”]*)[”"“]|‘([^’]*)[’'‘]|(\S+))/g;
         let match;
         while ((match = regex.exec(remainingArgs)) !== null) {
           const key = match[1].toLowerCase();
-          const value = match[2] || match[3] || match[4];
+          // Собираем значение из группы, которая реально сматчилась в зависимости от типа кавычек
+          const value = (match[2] || match[3] || match[4] || match[5] || match[6] || "").trim();
+
           if (key === "ratio") ratio = value;
           if (key === "rules" || key === "правила") rules = value;
-          if (key === "mandatorysuffix" || key === "суффикс") mandatorySuffix = value;
+          // ИСПРАВЛЕНО: Добавлен маппинг для короткого ключа "mandatory" и "суффикс"
+          if (key === "mandatory" || key === "mandatorysuffix" || key === "суффикс" || key === "обязательное")
+            mandatorySuffix = value;
         }
       }
     } else {
@@ -153,13 +158,14 @@ export async function POST(request) {
           folderId = args.folderId;
           rules = args.rules;
           ratio = args.ratio;
-          mandatorySuffix = args.mandatorySuffix;
+          mandatorySuffix = args.mandatorySuffix || args.mandatory;
         }
       } else {
+        // ИСПРАВЛЕНО: Заменен старый некорректный скопированный блок (убран body.prompt / body.spreadsheetId)
         folderId = body.folderId;
-        rules = body.rules;
+        rules = body.rules || body.правила;
         ratio = body.ratio;
-        mandatorySuffix = body.mandatorySuffix;
+        mandatorySuffix = body.mandatorySuffix || body.mandatory || body.суффикс;
       }
     }
 
@@ -197,7 +203,6 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
   console.log(`[Background Analyzer] Вход в фоновый режим. Папка: ${rootFolderId}`);
 
   try {
-    // ШАГ 1: Публикуем стартовое сообщение в канал
     if (slackChannelId) {
       const initialMessage = `🚀 *Запуск анализа папки:* \`${rootFolderId}\`\n⏳ Начинаю подключение к сервисам Google и обход директорий. Ссылки на готовые таблицы будут приходить ответами в этот тред!`;
       const slackRes = await sendSlackMessage(slackChannelId, initialMessage);
@@ -207,7 +212,6 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
         console.log(`[Slack OK] Стартовый тред успешно создан публично. TS: ${slackThreadTs}`);
       } else {
         console.error(`[Slack Error] Не удалось создать тред через chat.postMessage. Код ошибки: ${slackRes.error}`);
-        // Резервный канал оповещения, если токен не сработал
         if (responseUrl) {
           const warningBackupMsg =
             `⚠️ *Внимание:* Бот не смог опубликовать сообщение через стандартный API (ошибка: \`${slackRes.error}\`).\n` +
@@ -490,12 +494,10 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
           requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
         });
 
-        // --- УМНЫЙ ОПЕРАТИВНЫЙ ОТЧЕТ С ФОЛБЕКОМ ИЗ ТРЕДА В КАНАЛ ---
         const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
 
         if (slackChannelId && slackThreadTs) {
           const replyRes = await sendSlackMessage(slackChannelId, folderReadyMsg, slackThreadTs);
-          // Если Slack отверг ответ в тред, пишем резервным методом напрямую в канал
           if (!replyRes.ok && responseUrl) {
             await sendSlackResponseUrl(
               responseUrl,
@@ -517,7 +519,6 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
 
     await processFolder(rootFolderId);
 
-    // --- УМНЫЙ ФИНАЛЬНЫЙ ОТЧЕТ С ФОЛБЕКОМ ИЗ ТРЕДА В КАНАЛ ---
     const finalSlackSummary =
       `🏁 *Весь рекурсивный анализ полностью завершен!*\n\n` +
       `📈 *Итоги сессии:*\n` +

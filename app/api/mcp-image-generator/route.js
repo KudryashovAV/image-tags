@@ -5,7 +5,6 @@ import { Readable } from "stream";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
 const SINGLE_PROMPT_FOLDER_ID = "1aCmvzt6Vbw4glrHE-1BwUFZThW775Odt";
 
 // ГЛОБАЛЬНЫЙ СПИСОК ИЗВЕСТНЫХ МОДЕЛЕЙ
@@ -101,7 +100,7 @@ function mapOpenAiSize(ratio) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (С УМНЫМ КВАТЕРНЫМ ПАРСЕРОМ)
 // ========================================================
 export async function POST(request) {
   try {
@@ -126,12 +125,14 @@ export async function POST(request) {
       }
 
       const args = {};
-      const argRegex = /([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"/g;
+      // ИСПРАВЛЕНО: Регулярное выражение теперь поддерживает как прямые кавычки "", так и фигурные кавычки Slack “”, ””, ‘’, ’’
+      const argRegex = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|“([^”]*)[”"“]|‘([^’]*)[’'‘]|(\S+))/g;
       let match;
 
       while ((match = argRegex.exec(slackText)) !== null) {
         const key = match[1].toLowerCase();
-        const value = match[2].trim();
+        // Извлекаем значение из группы, которая реально сматчилась
+        const value = (match[2] || match[3] || match[4] || match[5] || match[6] || "").trim();
         args[key] = value;
       }
 
@@ -195,7 +196,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (С 3-КРАТНЫМ ПОВТОРОМ)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -283,19 +284,24 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         const openaiTargetSize = mapOpenAiSize(detectedRatio);
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
-        // ЦИКЛ НА 3 ПОПЫТКИ
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             if (currentModel === "gpt") {
               modelNameTag = "GPT-IMAGE-2";
               const startTime = performance.now();
-              const dallEApiResponse = await openai.images.generate({
-                model: "gpt-image-2",
-                prompt: strictPrompt,
-                size: openaiTargetSize,
-                quality: "high",
-                timeout: 60000,
-              });
+
+              const dallEApiResponse = await openai.images.generate(
+                {
+                  model: "gpt-image-2",
+                  prompt: strictPrompt,
+                  size: openaiTargetSize,
+                  quality: "high",
+                },
+                {
+                  timeout: 60000,
+                },
+              );
+
               const imageData = dallEApiResponse?.data?.[0];
 
               if (imageData?.url) {
@@ -329,7 +335,10 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           } catch (e) {
             lastErrorMsg = e.message;
             console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
-            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 2000)); // Пауза 2 сек перед повтором
+            if (attempt < 3) {
+              const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
+              await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+            }
           }
         }
 
@@ -420,7 +429,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (С 3-КРАТНЫМ ПОВТОРОМ)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (ПОМОДЕЛЬНЫЙ ТРЕКИНГ)
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -439,9 +448,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     const { drive, sheets } = await getGoogleAuth();
     const rootFolderId = "12WCWwQBMeT3Uwe2ITIjUfM0EAYxp7EmA";
 
-    if (!rootFolderId || rootFolderId === "undefined") {
+    if (!rootFolderId || rootFolderId === "undefined")
       throw new Error("Переменная GOOGLE_GENERATION_ROOT_FOLDER_ID не задана в .env");
-    }
 
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
     const firstSheetName = metadata.data.sheets[0].properties.title;
@@ -505,7 +513,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               break;
             }
           } catch (e) {
-            /* Игнорируем ошибки чтения чужого стейта */
+            /* Игнорируем ошибки */
           }
         }
       }
@@ -651,6 +659,29 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
     if (stateFileId) {
       stateData = (await drive.files.get({ fileId: stateFileId, alt: "media" })).data;
+
+      let calculatedCompleted = 0;
+      if (stateData && stateData.progress) {
+        Object.keys(stateData.progress).forEach((id) => {
+          const t = stateData.progress[id];
+
+          if (!t.completedModels) {
+            t.completedModels = {
+              gpt: t.status === "completed",
+              gemini: false,
+              gemini3: false,
+            };
+          }
+
+          if (t.completedModels.gpt && t.completedModels.gemini && t.completedModels.gemini3) {
+            t.status = "completed";
+            calculatedCompleted++;
+          } else if (t.status === "completed") {
+            t.status = "pending";
+          }
+        });
+        stateData.completedCount = calculatedCompleted;
+      }
     } else {
       tasks.forEach((t) => {
         stateData.progress[t.id] = {
@@ -660,6 +691,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           startedAt: null,
           completedAt: null,
           errors: [],
+          completedModels: { gpt: false, gemini: false, gemini3: false },
         };
       });
       stateFileId = (
@@ -674,7 +706,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     await sendSlackMessage(
       slackToken,
       channelId,
-      `⚙️ *Структура готова.* Начинаю рендеринг: *${stateData.totalCount}* промптов.\n📂 *Архив Диска:* ${dateFolderUrl}`,
+      `⚙ *Структура проверена.* Запускаю догенерацию пропущенных ИИ-моделей: *${stateData.totalCount}* строк.`,
       rootThreadTs,
     );
 
@@ -687,7 +719,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       try {
         task.status = "processing";
         task.startedAt = new Date().toISOString();
-        task.errors = [];
         await updateStateFile(drive, stateFileId, stateData);
 
         const detectedRatio = parseAspectRatio(task.prompt);
@@ -700,17 +731,16 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         const results = await Promise.all([
           // Поток 1: OpenAI gpt-image-2
           (async () => {
+            if (task.completedModels?.gpt) return { success: true };
+
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 const gptStartTime = performance.now();
-                const dallEApiResponse = await openai.images.generate({
-                  model: "gpt-image-2",
-                  prompt: strictPrompt,
-                  size: openaiTargetSize,
-                  quality: "high",
-                  timeout: 60000,
-                });
+                const dallEApiResponse = await openai.images.generate(
+                  { model: "gpt-image-2", prompt: strictPrompt, size: openaiTargetSize, quality: "high" },
+                  { timeout: 60000 },
+                );
                 const imageData = dallEApiResponse?.data?.[0];
                 let gptBase64;
 
@@ -736,13 +766,17 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, gptSheetId, gptRow);
+                  task.completedModels.gpt = true;
                   return { success: true };
                 }
                 throw new Error("No image data returned from OpenAI");
               } catch (e) {
                 lastError = e;
                 console.error(`[GPT-Image Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000)); // Ждем 2 сек и повторяем
+                if (attempt < 3) {
+                  const backoffDelay = Math.pow(2, attempt) * 3000 + Math.random() * 1000;
+                  await new Promise((r) => setTimeout(r, backoffDelay));
+                }
               }
             }
             return {
@@ -753,6 +787,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           // Поток 2: GEMINI IMAGEN 4 ULTRA
           (async () => {
+            if (task.completedModels?.gemini) return { success: true };
+
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
@@ -776,13 +812,17 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+                  task.completedModels.gemini = true;
                   return { success: true };
                 }
                 throw new Error("No bytes returned from Imagen Ultra");
               } catch (e) {
                 lastError = e;
                 console.error(`[Imagen Ultra Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+                if (attempt < 3) {
+                  const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
+                  await new Promise((r) => setTimeout(r, backoffDelay));
+                }
               }
             }
             return {
@@ -793,6 +833,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           // Поток 3: GEMINI 3 PRO IMAGE
           (async () => {
+            if (task.completedModels?.gemini3) return { success: true };
+
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
@@ -816,13 +858,17 @@ async function backgroundProcessor(spreadsheetId, channelId) {
                     task.prompt,
                   ];
                   await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+                  task.completedModels.gemini3 = true;
                   return { success: true };
                 }
                 throw new Error("No bytes returned from Gemini 3 Pro");
               } catch (e) {
                 lastError = e;
                 console.error(`[Gemini 3 Pro Строка ${id} | Попытка ${attempt}]:`, e.message);
-                if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+                if (attempt < 3) {
+                  const backoffDelay = Math.pow(2, attempt) * 4000 + Math.random() * 1500;
+                  await new Promise((r) => setTimeout(r, backoffDelay));
+                }
               }
             }
             return {
@@ -832,17 +878,15 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           })(),
         ]);
 
-        let rowSucceeded = false;
-        task.errors = [];
-
         for (const res of results) {
-          if (res.success) rowSucceeded = true;
-          if (res.error) task.errors.push(res.error);
+          if (res.error && !task.errors.includes(res.error)) {
+            task.errors.push(res.error);
+          }
         }
 
         task.completedAt = new Date().toISOString();
 
-        if (rowSucceeded) {
+        if (task.completedModels.gpt && task.completedModels.gemini && task.completedModels.gemini3) {
           task.status = "completed";
           stateData.completedCount++;
         } else {
@@ -855,14 +899,13 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         task.errors.push(`Critical Exception: ${lineError.message}`);
       }
 
-      // Сохраняем стейт в Google Drive после каждой строки для 100% контроля
       try {
         await updateStateFile(drive, stateFileId, stateData);
       } catch (e) {
         console.error("[State Saving Error]:", e.message);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 4000));
     }
 
     console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию...");
@@ -878,7 +921,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     const finalSummaryText =
       `🏁 *Массовая тройная генерация завершена!*\n` +
       `• Всего промптов обработано: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк с изображениями: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `• Успешно закрыто строк с полным пакетом изображений: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
       `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
       `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
 
