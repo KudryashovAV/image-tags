@@ -76,7 +76,35 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (КВАТЕРНЫЙ ПАРСЕР КЛЮЧ="ЗНАЧЕНИЕ")
+// УМНЫЕ ХЕЛПЕРЫ ДЛЯ АВТОМАТИЧЕСКОГО ОПРЕДЕЛЕНИЯ СООТНОШЕНИЯ СТОРОН
+// ========================================================
+function parseAspectRatio(promptText) {
+  const match = promptText.match(/\b(\d+):(\d+)\b/);
+  if (match) {
+    let w = parseInt(match[1]);
+    let h = parseInt(match[2]);
+
+    // Принудительная вертикаль
+    if (w > h) [w, h] = [h, w];
+
+    return `${w}:${h}`;
+  }
+  return "9:16"; // Дефолтный вертикальный откат
+}
+
+function mapOpenAiSize(ratio) {
+  const sizeMap = {
+    "9:16": "1440x2560",
+    "16:9": "2560x1440",
+    "1:1": "1920x1920",
+    "4:3": "2048x1536",
+    "3:4": "1536x2048",
+  };
+  return sizeMap[ratio] || "1440x2560";
+}
+
+// ========================================================
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ
 // ========================================================
 export async function POST(request) {
   try {
@@ -191,14 +219,21 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
     return;
   }
 
+  const detectedRatio = parseAspectRatio(prompt);
   const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
 
+  const compositionAnchors =
+    ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
+  const enhancedPrompt = prompt.trim() + compositionAnchors; // ИСПРАВЛЕНО: Добавлен trim() для чистоты
+
   if (slackToken && channelId) {
+    // ИСПРАВЛЕНО: Убрана переменная currentModel (которой тут не было), вызывавшая краш
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
       `🎨 *Запуск одиночной High-Res генерации изображения!*\n` +
         `• *Выбранный стек ИИ:* \`${modelLabel}\`\n` +
+        `• *Формат кадра:* \`${detectedRatio}\` (Строгая вертикаль)\n` +
         `• *Промт:* \`${prompt}\`\n` +
         `🛠 ...Связываюсь со структурами логов на Диске...`,
     );
@@ -242,11 +277,14 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       rootThreadTs,
     );
 
+    // Внутри цикла уже определяем специфику для каждой модели
     for (const currentModel of modelsToRun) {
       let imageBase64 = null;
       let durationStr = "Ошибка";
       let modelNameTag = "ОШИБКА";
-      const strictPrompt = `Use the provided prompt verbatim without any modifications: ${prompt}`;
+
+      const openaiTargetSize = mapOpenAiSize(detectedRatio);
+      const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
       if (currentModel === "gpt") {
         modelNameTag = "GPT-IMAGE-2";
@@ -255,7 +293,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: "1440x2560",
+            size: openaiTargetSize,
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -274,7 +312,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         modelNameTag = "IMAGEN 4 ULTRA";
         const startTime = performance.now();
         try {
-          imageBase64 = await generateImagen3(prompt);
+          imageBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
           const endTime = performance.now();
           durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
@@ -286,7 +324,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         modelNameTag = "GEMINI 3 PRO IMAGE";
         const startTime = performance.now();
         try {
-          imageBase64 = await generateGemini3ProImage(prompt);
+          imageBase64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
           const endTime = performance.now();
           durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
@@ -378,7 +416,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ (ОПТИМИЗИРОВАН)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -486,30 +524,35 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         q: `'${dateFolderId}' in parents and trashed = false`,
         fields: "files(id, name)",
       });
-      subfolders.data.files.forEach((f) => {
+
+      // ИСПРАВЛЕНО: Безопасное присвоение, чтобы избежать краша, если папки удалены вручную
+      subfolders.data?.files?.forEach((f) => {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
         if (f.name === "gemini-3-pro-image") gemini3FolderId = f.id;
       });
 
-      gptSheetId = (
-        await drive.files.list({
-          q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
-      geminiUltraSheetId = (
-        await drive.files.list({
-          q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
-      gemini3SheetId = (
-        await drive.files.list({
-          q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
+      if (gptFolderId)
+        gptSheetId = (
+          await drive.files.list({
+            q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            fields: "files(id)",
+          })
+        ).data?.files?.[0]?.id;
+      if (geminiUltraFolderId)
+        geminiUltraSheetId = (
+          await drive.files.list({
+            q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            fields: "files(id)",
+          })
+        ).data?.files?.[0]?.id;
+      if (gemini3FolderId)
+        gemini3SheetId = (
+          await drive.files.list({
+            q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            fields: "files(id)",
+          })
+        ).data?.files?.[0]?.id;
     } else {
       const now = new Date();
       const timeStr = `${now.toLocaleDateString("ru-RU")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -643,11 +686,20 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       const task = stateData.progress[id];
       if (task.status === "completed" || task.status === "failed") continue;
 
+      let rowSucceeded = false;
+
       try {
-        // ИСПРАВЛЕНО: Статус меняем в локальной памяти. Убрали промежуточную запись на Диск (МИНУС 1 запрос к лимитам)
         task.status = "processing";
 
-        const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
+        const detectedRatio = parseAspectRatio(task.prompt);
+        const openaiTargetSize = mapOpenAiSize(detectedRatio);
+
+        // КЛИНИЧЕСКИЕ АНТИ-ТИЛТ И КОМПОЗИЦИОННЫЕ ЯКОРЯ ДЛЯ НЕЙРОСЕТИ
+        const compositionAnchors =
+          ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
+        const enhancedPrompt = task.prompt.trim() + compositionAnchors;
+
+        const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
         // --- 1. OpenAI gpt-image-2 ---
         let gptFileUrl = "Ошибка";
@@ -657,7 +709,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: "1440x2560",
+            size: openaiTargetSize,
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -678,7 +730,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               "GPT-IMAGE-2",
               task.prompt,
             ];
-            await appendRowAndResize(sheets, gptSheetId, gptRow);
+            await appendRowOnly(sheets, gptSheetId, gptRow);
+            rowSucceeded = true;
           }
         } catch (e) {
           console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
@@ -689,7 +742,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         let geminiDurationStr = "Ошибка";
         try {
           const geminiStartTime = performance.now();
-          const imagenBase64 = await generateImagen3(task.prompt);
+          const imagenBase64 = await generateImagen3(enhancedPrompt, detectedRatio);
           const geminiEndTime = performance.now();
           geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
 
@@ -708,7 +761,8 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               "IMAGEN 4 ULTRA",
               task.prompt,
             ];
-            await appendRowAndResize(sheets, geminiUltraSheetId, geminiRow);
+            await appendRowOnly(sheets, geminiUltraSheetId, geminiRow);
+            rowSucceeded = true;
           }
         } catch (e) {
           console.error(`[Imagen Ultra Error] Строка ${id}:`, e.message);
@@ -719,7 +773,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         let gemini3DurationStr = "Ошибка";
         try {
           const gemini3StartTime = performance.now();
-          const gemini3Base64 = await generateGemini3ProImage(task.prompt);
+          const gemini3Base64 = await generateGemini3ProImage(enhancedPrompt, detectedRatio);
           const gemini3EndTime = performance.now();
           gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
@@ -738,20 +792,24 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               "GEMINI 3 PRO IMAGE",
               task.prompt,
             ];
-            await appendRowAndResize(sheets, gemini3SheetId, gemini3Row);
+            await appendRowOnly(sheets, gemini3SheetId, gemini3Row);
+            rowSucceeded = true;
           }
         } catch (e) {
           console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
         }
 
-        task.status = "completed";
-        stateData.completedCount++;
+        if (rowSucceeded) {
+          task.status = "completed";
+          stateData.completedCount++;
+        } else {
+          task.status = "failed";
+        }
       } catch (lineError) {
         console.error(`[Row Critical Error] Ошибка обработки строки ${id}:`, lineError.message);
         task.status = "failed";
       }
 
-      // ИСПРАВЛЕНО: Синхронизируем стейт на Диске раз в 5 строк или на самом последнем элементе (МИНУС 90% трафика стейта)
       const currentIdx = taskIds.indexOf(id) + 1;
       if (currentIdx % 5 === 0 || currentIdx === taskIds.length) {
         try {
@@ -761,14 +819,24 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         }
       }
 
-      // ИСПРАВЛЕНО: Тактовая пауза в 300мс, чтобы Google API успевал очищать лимиты подключений
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
+    console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию интерфейсов таблиц...");
+
+    // ИСПРАВЛЕНО: Защита стилизации, если таблицы не создались
+    if (gptSheetId && geminiUltraSheetId && gemini3SheetId) {
+      await Promise.all([
+        finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
+        finalizeSheetStyle(sheets, geminiUltraSheetId, stateData.totalCount),
+        finalizeSheetStyle(sheets, gemini3SheetId, stateData.totalCount),
+      ]).catch((e) => console.error("[Styling Finalize Error]:", e.message));
+    }
+
     const finalSummaryText =
-      `🏁 *Массовая тройная генерация успешно завершена!*\n` +
-      `• Всего промптов: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `🏁 *Массовая тройная генерация завершена!*\n` +
+      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
+      `• Успешно закрыто строк с изображениями: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
       `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
       `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
 
@@ -784,9 +852,50 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 }
 
 // ========================================================
-// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
 // ========================================================
-async function generateImagen3(clientPrompt) {
+async function appendRowOnly(sheets, spreadsheetId, rowValues) {
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Лог!A:F",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [rowValues] },
+    });
+  } catch (error) {
+    // Защита от падения: логируем, но не даем рухнуть всей сессии из-за одной строки
+    console.error(`[Append Row Error] Не удалось записать лог в таблицу ${spreadsheetId}:`, error.message);
+  }
+}
+
+async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateDimensionProperties: {
+            range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: totalRows + 1 },
+            properties: { pixelSize: 250 },
+            fields: "pixelSize",
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+            properties: { pixelSize: 250 },
+            fields: "pixelSize",
+          },
+        },
+      ],
+    },
+  });
+}
+
+// ========================================================
+// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ (ПРИНИМАЮТ aspect_ratio)
+// ========================================================
+async function generateImagen3(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "imagen-4.0-ultra-generate-001";
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
@@ -797,7 +906,12 @@ async function generateImagen3(clientPrompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       instances: [{ prompt: clientPrompt }],
-      parameters: { sampleCount: 1, aspectRatio: "9:16", imageSize: "2K", outputMimeType: "image/png" },
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: aspectRatio,
+        imageSize: "2K",
+        outputMimeType: "image/png",
+      },
     }),
   });
 
@@ -808,7 +922,7 @@ async function generateImagen3(clientPrompt) {
   return base64Image;
 }
 
-async function generateGemini3ProImage(clientPrompt) {
+async function generateGemini3ProImage(clientPrompt, aspectRatio = "9:16") {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "gemini-3-pro-image";
   if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
@@ -821,7 +935,7 @@ async function generateGemini3ProImage(clientPrompt) {
       contents: [{ parts: [{ text: clientPrompt }] }],
       generationConfig: {
         imageConfig: {
-          aspectRatio: "9:16",
+          aspectRatio: aspectRatio,
           imageSize: "2K",
         },
       },
@@ -850,36 +964,5 @@ async function updateStateFile(drive, fileId, stateData) {
   await drive.files.update({
     fileId,
     media: { mimeType: "application/json", body: Readable.from(JSON.stringify(stateData, null, 2)) },
-  });
-}
-
-async function appendRowAndResize(sheets, spreadsheetId, rowValues) {
-  const appendRes = await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: "Лог!A:F",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [rowValues] },
-  });
-  const rowNumber = parseInt(appendRes.data.updates.updatedRange.split("!")[1].split(":")[0].replace(/\D/g, ""));
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "ROWS", startIndex: rowNumber - 1, endIndex: rowNumber },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
-          },
-        },
-        {
-          updateDimensionProperties: {
-            range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
-            properties: { pixelSize: 250 },
-            fields: "pixelSize",
-          },
-        },
-      ],
-    },
   });
 }
