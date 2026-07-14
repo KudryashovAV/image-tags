@@ -76,7 +76,7 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
 }
 
 // ========================================================
-// ИСПРАВЛЕНО: ХЕЛИПЕРЫ СТРОГО ВЕРТИКАЛЬНОЙ ОРИЕНТАЦИИ
+// УМНЫЕ ХЕЛПЕРЫ ДЛЯ АВТОМАТИЧЕСКОГО ОПРЕДЕЛЕНИЯ СООТНОШЕНИЯ СТОРОН
 // ========================================================
 function parseAspectRatio(promptText) {
   const match = promptText.match(/\b(\d+):(\d+)\b/);
@@ -84,7 +84,7 @@ function parseAspectRatio(promptText) {
     let w = parseInt(match[1]);
     let h = parseInt(match[2]);
 
-    // Если ширина больше высоты (горизонтальный кадр) — принудительно переворачиваем в вертикальный
+    // Принудительная вертикаль
     if (w > h) [w, h] = [h, w];
 
     return `${w}:${h}`;
@@ -104,7 +104,7 @@ function mapOpenAiSize(ratio) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (КВАТЕРНЫЙ ПАРСЕР КЛЮЧ="ЗНАЧЕНИЕ")
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ
 // ========================================================
 export async function POST(request) {
   try {
@@ -198,7 +198,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 }
 
 // ========================================================
-// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ (ДИНАМИЧЕСКОЕ РАТИО)
+// ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
 async function backgroundSingleProcessor(prompt, model, channelId) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
@@ -220,15 +220,14 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
   }
 
   const detectedRatio = parseAspectRatio(prompt);
-  const openaiTargetSize = mapOpenAiSize(detectedRatio);
   const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
 
-  // ТЕХНИЧЕСКИЕ ЯКОРЯ ДЛЯ СТРОГОЙ ГЕОМЕТРИИ И ПРЯМОГО ГОРИЗОНТА
   const compositionAnchors =
     ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
-  const enhancedPrompt = prompt + compositionAnchors;
+  const enhancedPrompt = prompt.trim() + compositionAnchors; // ИСПРАВЛЕНО: Добавлен trim() для чистоты
 
   if (slackToken && channelId) {
+    // ИСПРАВЛЕНО: Убрана переменная currentModel (которой тут не было), вызывавшая краш
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
@@ -278,12 +277,13 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       rootThreadTs,
     );
 
+    // Внутри цикла уже определяем специфику для каждой модели
     for (const currentModel of modelsToRun) {
       let imageBase64 = null;
       let durationStr = "Ошибка";
       let modelNameTag = "ОШИБКА";
 
-      // OpenAI получает усиленный промпт внутри своей сервисной обертки
+      const openaiTargetSize = mapOpenAiSize(detectedRatio);
       const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
       if (currentModel === "gpt") {
@@ -342,7 +342,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
         const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
 
-        // Логируем исходный prompt без технических служебных хвостов
         const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
         await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
 
@@ -417,7 +416,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР (СТРОГАЯ ВЕРТИКАЛЬ)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР
 // ========================================================
 async function backgroundProcessor(spreadsheetId, channelId) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
@@ -525,30 +524,35 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         q: `'${dateFolderId}' in parents and trashed = false`,
         fields: "files(id, name)",
       });
-      subfolders.data.files.forEach((f) => {
+
+      // ИСПРАВЛЕНО: Безопасное присвоение, чтобы избежать краша, если папки удалены вручную
+      subfolders.data?.files?.forEach((f) => {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
         if (f.name === "gemini-3-pro-image") gemini3FolderId = f.id;
       });
 
-      gptSheetId = (
-        await drive.files.list({
-          q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
-      geminiUltraSheetId = (
-        await drive.files.list({
-          q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
-      gemini3SheetId = (
-        await drive.files.list({
-          q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
+      if (gptFolderId)
+        gptSheetId = (
+          await drive.files.list({
+            q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            fields: "files(id)",
+          })
+        ).data?.files?.[0]?.id;
+      if (geminiUltraFolderId)
+        geminiUltraSheetId = (
+          await drive.files.list({
+            q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            fields: "files(id)",
+          })
+        ).data?.files?.[0]?.id;
+      if (gemini3FolderId)
+        gemini3SheetId = (
+          await drive.files.list({
+            q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+            fields: "files(id)",
+          })
+        ).data?.files?.[0]?.id;
     } else {
       const now = new Date();
       const timeStr = `${now.toLocaleDateString("ru-RU")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -693,7 +697,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         // КЛИНИЧЕСКИЕ АНТИ-ТИЛТ И КОМПОЗИЦИОННЫЕ ЯКОРЯ ДЛЯ НЕЙРОСЕТИ
         const compositionAnchors =
           ", portrait orientation, vertical composition, vertical framing, perfectly straight level horizon, straight camera angle, no canted angles, no tilted frame, traditional portrait layout";
-        const enhancedPrompt = task.prompt + compositionAnchors;
+        const enhancedPrompt = task.prompt.trim() + compositionAnchors;
 
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${enhancedPrompt}`;
 
@@ -718,7 +722,6 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 
           if (gptBase64) {
             gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
-            // Сохраняем в таблицу исходный task.prompt без служебного хвоста
             const gptRow = [
               task.cellUrl,
               `=IMAGE("${gptFileUrl}")`,
@@ -820,11 +823,15 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     }
 
     console.log("[Background Worker] Конвейер завершен. Применяю финальную стилизацию интерфейсов таблиц...");
-    await Promise.all([
-      finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
-      finalizeSheetStyle(sheets, geminiUltraSheetId, stateData.totalCount),
-      finalizeSheetStyle(sheets, gemini3SheetId, stateData.totalCount),
-    ]).catch((e) => console.error("[Styling Finalize Error]:", e.message));
+
+    // ИСПРАВЛЕНО: Защита стилизации, если таблицы не создались
+    if (gptSheetId && geminiUltraSheetId && gemini3SheetId) {
+      await Promise.all([
+        finalizeSheetStyle(sheets, gptSheetId, stateData.totalCount),
+        finalizeSheetStyle(sheets, geminiUltraSheetId, stateData.totalCount),
+        finalizeSheetStyle(sheets, gemini3SheetId, stateData.totalCount),
+      ]).catch((e) => console.error("[Styling Finalize Error]:", e.message));
+    }
 
     const finalSummaryText =
       `🏁 *Массовая тройная генерация завершена!*\n` +
@@ -848,12 +855,17 @@ async function backgroundProcessor(spreadsheetId, channelId) {
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ОПТИМИЗАЦИИ GOOGLE API
 // ========================================================
 async function appendRowOnly(sheets, spreadsheetId, rowValues) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: "Лог!A:F",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [rowValues] },
-  });
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Лог!A:F",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [rowValues] },
+    });
+  } catch (error) {
+    // Защита от падения: логируем, но не даем рухнуть всей сессии из-за одной строки
+    console.error(`[Append Row Error] Не удалось записать лог в таблицу ${spreadsheetId}:`, error.message);
+  }
 }
 
 async function finalizeSheetStyle(sheets, spreadsheetId, totalRows) {
