@@ -5,7 +5,6 @@ import { Readable } from "stream";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
 const SINGLE_PROMPT_FOLDER_ID = "1aCmvzt6Vbw4glrHE-1BwUFZThW775Odt";
 
 // ГЛОБАЛЬНЫЙ СПИСОК ИЗВЕСТНЫХ МОДЕЛЕЙ
@@ -289,13 +288,20 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
             if (currentModel === "gpt") {
               modelNameTag = "GPT-IMAGE-2";
               const startTime = performance.now();
-              const dallEApiResponse = await openai.images.generate({
-                model: "gpt-image-2",
-                prompt: strictPrompt,
-                size: openaiTargetSize,
-                quality: "high",
-                timeout: 60000,
-              });
+
+              // ИСПРАВЛЕНО: timeout перенесен во второй аргумент (Request Options)
+              const dallEApiResponse = await openai.images.generate(
+                {
+                  model: "gpt-image-2",
+                  prompt: strictPrompt,
+                  size: openaiTargetSize,
+                  quality: "high",
+                },
+                {
+                  timeout: 60000,
+                },
+              );
+
               const imageData = dallEApiResponse?.data?.[0];
 
               if (imageData?.url) {
@@ -329,7 +335,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           } catch (e) {
             lastErrorMsg = e.message;
             console.error(`[Single Worker ${modelNameTag} | Попытка ${attempt}]:`, e.message);
-            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 2000)); // Пауза 2 сек перед повтором
+            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 2000));
           }
         }
 
@@ -704,13 +710,20 @@ async function backgroundProcessor(spreadsheetId, channelId) {
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
                 const gptStartTime = performance.now();
-                const dallEApiResponse = await openai.images.generate({
-                  model: "gpt-image-2",
-                  prompt: strictPrompt,
-                  size: openaiTargetSize,
-                  quality: "high",
-                  timeout: 60000,
-                });
+
+                // ИСПРАВЛЕНО: timeout перенесен во второй аргумент (Request Options)
+                const dallEApiResponse = await openai.images.generate(
+                  {
+                    model: "gpt-image-2",
+                    prompt: strictPrompt,
+                    size: openaiTargetSize,
+                    quality: "high",
+                  },
+                  {
+                    timeout: 60000,
+                  },
+                );
+
                 const imageData = dallEApiResponse?.data?.[0];
                 let gptBase64;
 
