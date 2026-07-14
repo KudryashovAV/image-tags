@@ -76,7 +76,32 @@ async function sendSlackMessage(token, channel, text, threadTs = null) {
 }
 
 // ========================================================
-// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ (КВАТЕРНЫЙ ПАРСЕР КЛЮЧ="ЗНАЧЕНИЕ")
+// УМНЫЕ ХЕЛПЕРЫ ДЛЯ ОПРЕДЕЛЕНИЯ ФОРМАТА КАДРА
+// ========================================================
+function parseAspectRatio(promptText) {
+  const match = promptText.match(/\b(\d+):(\d+)\b/);
+  if (match) {
+    let w = parseInt(match[1]);
+    let h = parseInt(match[2]);
+    if (w > h) [w, h] = [h, w]; // Принудительная вертикаль
+    return `${w}:${h}`;
+  }
+  return "9:16";
+}
+
+function mapOpenAiSize(ratio) {
+  const sizeMap = {
+    "9:16": "1440x2560",
+    "16:9": "2560x1440",
+    "1:1": "1920x1920",
+    "4:3": "2048x1536",
+    "3:4": "1536x2048",
+  };
+  return sizeMap[ratio] || "1440x2560";
+}
+
+// ========================================================
+// ГЛАВНЫЙ ОПЕРАЦИОННЫЙ ЭНДПОИНТ
 // ========================================================
 export async function POST(request) {
   try {
@@ -101,19 +126,19 @@ export async function POST(request) {
       }
 
       const args = {};
-      const argRegex = /([a-zA-Z0-9_]+)\s*=\s*"([^"]*)"/g;
+      const argRegex = /(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|“([^”]*)[”"“]|‘([^’]*)[’'‘]|(\S+))/g;
       let match;
 
       while ((match = argRegex.exec(slackText)) !== null) {
         const key = match[1].toLowerCase();
-        const value = match[2].trim();
+        const value = (match[2] || match[3] || match[4] || match[5] || match[6] || "").trim();
         args[key] = value;
       }
 
       if (Object.keys(args).length === 0) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: '❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках. Примеры:\n• \`/generate table_id=\"1YHFdKYs...\"\`\n• \`/generate prompt=\"Сказочный лес\" models=\"gpt, gemini3\"\`',
+          text: "❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках.",
         });
       }
 
@@ -127,6 +152,7 @@ export async function POST(request) {
         selectedModel = body.model?.toLowerCase() || "all";
       } else {
         spreadsheetId = body.spreadsheetId;
+        selectedModel = body.model?.toLowerCase() || "all";
       }
     }
 
@@ -142,12 +168,12 @@ export async function POST(request) {
       }
       return NextResponse.json({ success: true, message: `Фоновый процесс одиночной генерации запущен.` });
     } else if (spreadsheetId) {
-      backgroundProcessor(spreadsheetId, channelId);
+      backgroundProcessor(spreadsheetId, channelId, selectedModel);
 
       if (isSlack) {
         return NextResponse.json({
           response_type: "ephemeral",
-          text: `⏳ *Запрос на пакетную генерацию принят!* Начинаю развертывание тройной сессии по таблице-донору в общем канале...`,
+          text: `⏳ *Запрос на пакетную генерацию принят!* Начинаю развертывание сессии по таблице-донору в общем канале...`,
         });
       }
       return NextResponse.json({ success: true, message: `Пакетный фоновый процесс генерации запущен.` });
@@ -182,25 +208,19 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
   if (modelsToRun.length === 0) {
     if (slackToken && channelId) {
-      await sendSlackMessage(
-        slackToken,
-        channelId,
-        `❌ *Ошибка отмены:* Не найдено валидных моделей в списке \`${model}\`. Доступны: \`gpt, gemini, gemini3\``,
-      );
+      await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Не найдено валидных моделей.`);
     }
     return;
   }
 
+  const detectedRatio = parseAspectRatio(prompt);
   const modelLabel = modelsToRun.map((m) => m.toUpperCase()).join(" + ");
 
   if (slackToken && channelId) {
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
-      `🎨 *Запуск одиночной High-Res генерации изображения!*\n` +
-        `• *Выбранный стек ИИ:* \`${modelLabel}\`\n` +
-        `• *Промт:* \`${prompt}\`\n` +
-        `🛠 ...Связываюсь со структурами логов на Диске...`,
+      `🎨 *Запуск одиночной High-Res генерации изображения!*\n• *Выбранный стек ИИ:* \`${modelLabel}\`\n• *Промт:* \`${prompt}\`\n🛠 ...Связываюсь со структурами логов на Диске...`,
     );
   }
 
@@ -216,7 +236,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
     if (sheetCheck.data.files && sheetCheck.data.files.length > 0) {
       targetSheetId = sheetCheck.data.files[0].id;
     } else {
-      console.log("[Single Worker] Таблица логов не найдена. Создаю новую...");
       const newSheet = await sheets.spreadsheets.create({
         requestBody: {
           properties: { title: "Лог одиночных генераций" },
@@ -255,7 +274,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
           const dallEApiResponse = await openai.images.generate({
             model: "gpt-image-2",
             prompt: strictPrompt,
-            size: "1440x2560",
+            size: mapOpenAiSize(detectedRatio),
             quality: "high",
           });
           const imageData = dallEApiResponse?.data?.[0];
@@ -263,8 +282,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
             ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
             : imageData?.b64_json;
 
-          const endTime = performance.now();
-          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+          durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
           console.error("[Single Worker GPT Error]:", e.message);
           await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка GPT:* \`${e.message}\``, rootThreadTs);
@@ -275,8 +293,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         const startTime = performance.now();
         try {
           imageBase64 = await generateImagen3(prompt);
-          const endTime = performance.now();
-          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+          durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
           console.error("[Single Worker Gemini Error]:", e.message);
           await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini Ultra:* \`${e.message}\``, rootThreadTs);
@@ -287,8 +304,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         const startTime = performance.now();
         try {
           imageBase64 = await generateGemini3ProImage(prompt);
-          const endTime = performance.now();
-          durationStr = `${((endTime - startTime) / 1000).toFixed(2)} сек`;
+          durationStr = `${((performance.now() - startTime) / 1000).toFixed(2)} сек`;
         } catch (e) {
           console.error("[Single Worker Gemini 3 Error]:", e.message);
           await sendSlackMessage(slackToken, channelId, `⚠️ *Ошибка Gemini 3 Pro:* \`${e.message}\``, rootThreadTs);
@@ -299,33 +315,23 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       if (imageBase64) {
         const now = new Date();
         const pad = (n) => String(n).padStart(2, "0");
-        const fileTimeStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+        const fileTimeStr = `${now.getDate()}.${now.getMonth() + 1}_${now.getHours()}-${now.getMinutes()}`;
         const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
 
         const fileUrl = await uploadBase64ToDrive(drive, imageBase64, filename, SINGLE_PROMPT_FOLDER_ID);
-
         const rowValues = [fileUrl, `=IMAGE("${fileUrl}")`, prompt, durationStr, modelNameTag];
         await appendAndFormatSingleRow(sheets, targetSheetId, rowValues);
 
-        const intermediateMsg =
-          `✅ *Генерация через ${modelNameTag} завершена!*\n` +
-          `• Время рендеринга: *${durationStr}*\n` +
-          `👉 *Ссылка на High-Res:* ${fileUrl}`;
-
-        await sendSlackMessage(slackToken, channelId, intermediateMsg, rootThreadTs);
+        await sendSlackMessage(
+          slackToken,
+          channelId,
+          `✅ *Генерация через ${modelNameTag} завершена!*\n👉 *Ссылка:* ${fileUrl}`,
+          rootThreadTs,
+        );
       }
     }
-
-    const finalSuccessMsg = `🏁 *Одиночная сессия полностью завершена!* Все результаты занесены в общую таблицу логов папки \`${SINGLE_PROMPT_FOLDER_ID}\`.`;
-    await sendSlackMessage(slackToken, channelId, finalSuccessMsg, rootThreadTs);
   } catch (error) {
-    console.error("[Single Worker Error]:", error.message);
-    await sendSlackMessage(
-      slackToken,
-      channelId,
-      `❌ *Критический сбой одиночного процессора:* \`${error.message}\``,
-      rootThreadTs,
-    );
+    console.error(error);
   }
 }
 
@@ -378,20 +384,21 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 }
 
 // ========================================================
-// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ (ОПТИМИЗИРОВАН)
+// ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ
 // ========================================================
-async function backgroundProcessor(spreadsheetId, channelId) {
+async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
+
+  let modelsToRun = model === "all" ? [...KNOWN_MODELS] : model.split(",").map((m) => m.trim().toLowerCase());
+  modelsToRun = modelsToRun.filter((m) => KNOWN_MODELS.includes(m));
 
   if (slackToken && channelId) {
     rootThreadTs = await sendSlackMessage(
       slackToken,
       channelId,
-      `🚀 *Запуск массовой High-Res генерации изображений по списку (3 ИИ-модели)!*\n` +
-        `📊 *Таблица-донор:* \`${spreadsheetId}\`\n` +
-        `🛠️ Разворачиваю тройную структуру каталогов на Google Диске...`,
+      `🚀 *Запуск массовой High-Res генерации изображений по списку (${modelsToRun.map((m) => m.toUpperCase()).join(" + ")})!*\n📊 *Таблица-донор:* \`${spreadsheetId}\`\n🛠️ Разворачиваю каталоги на Google Диске...`,
     );
   }
 
@@ -411,12 +418,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     const rows = sheetData.data.values || [];
 
     if (rows.length <= 1) {
-      await sendSlackMessage(
-        slackToken,
-        channelId,
-        `❌ *Ошибка отмены:* Указанная таблица-донор \`${spreadsheetId}\` пуста.`,
-        rootThreadTs,
-      );
+      await sendSlackMessage(slackToken, channelId, `❌ *Ошибка отмены:* Таблица пуста.`, rootThreadTs);
       return;
     }
 
@@ -426,7 +428,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       await sendSlackMessage(
         slackToken,
         channelId,
-        `❌ *Ошибка отмены:* Колонка "Промт для воссоздания" не найдена в таблице \`${spreadsheetId}\`.`,
+        `❌ *Ошибка:* Колонка "Промт для воссоздания" не найдена.`,
         rootThreadTs,
       );
       return;
@@ -475,7 +477,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
               break;
             }
           } catch (e) {
-            console.error("[State Check Error]: Can't read state file, skipping folder.", e.message);
+            console.error(e.message);
           }
         }
       }
@@ -486,30 +488,31 @@ async function backgroundProcessor(spreadsheetId, channelId) {
         q: `'${dateFolderId}' in parents and trashed = false`,
         fields: "files(id, name)",
       });
-      subfolders.data.files.forEach((f) => {
+
+      subfolders.data?.files?.forEach((f) => {
         if (f.name === "gpt") gptFolderId = f.id;
         if (f.name === "gemini-imagen-ultra") geminiUltraFolderId = f.id;
         if (f.name === "gemini-3-pro-image") gemini3FolderId = f.id;
       });
 
-      gptSheetId = (
-        await drive.files.list({
-          q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
-      geminiUltraSheetId = (
-        await drive.files.list({
-          q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
-      gemini3SheetId = (
-        await drive.files.list({
-          q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
-          fields: "files(id)",
-        })
-      ).data.files[0]?.id;
+      if (gptFolderId)
+        gptSheetId = (
+          await drive.files.list({
+            q: `'${gptFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+          })
+        ).data.files?.[0]?.id;
+      if (geminiUltraFolderId)
+        geminiUltraSheetId = (
+          await drive.files.list({
+            q: `'${geminiUltraFolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+          })
+        ).data.files?.[0]?.id;
+      if (gemini3FolderId)
+        gemini3SheetId = (
+          await drive.files.list({
+            q: `'${gemini3FolderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet'`,
+          })
+        ).data.files?.[0]?.id;
     } else {
       const now = new Date();
       const timeStr = `${now.toLocaleDateString("ru-RU")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -634,7 +637,7 @@ async function backgroundProcessor(spreadsheetId, channelId) {
     await sendSlackMessage(
       slackToken,
       channelId,
-      `⚙️ *Структура развернута:* Промптов в работе: *${stateData.totalCount}*.\n📂 *Рабочий архив Диска:* ${dateFolderUrl}\n🛸 Включаю нейросети, запускаю параллельный рендеринг через GPT, Imagen Ultra и Gemini 3 Pro...`,
+      `⚙️ *Структура развернута:* Промптов в работе: *${stateData.totalCount}*.\n📂 *Архив Диска:* ${dateFolderUrl}\n🛸 Запускаю рендеринг по выбранным моделям...`,
       rootThreadTs,
     );
 
@@ -644,152 +647,138 @@ async function backgroundProcessor(spreadsheetId, channelId) {
       if (task.status === "completed" || task.status === "failed") continue;
 
       try {
-        // ИСПРАВЛЕНО: Статус меняем в локальной памяти. Убрали промежуточную запись на Диск (МИНУС 1 запрос к лимитам)
         task.status = "processing";
-
+        const detectedRatio = parseAspectRatio(task.prompt);
         const strictPrompt = `Use the provided prompt verbatim without any modifications: ${task.prompt}`;
 
-        // --- 1. OpenAI gpt-image-2 ---
-        let gptFileUrl = "Ошибка";
-        let gptDurationStr = "Ошибка";
-        try {
-          const gptStartTime = performance.now();
-          const dallEApiResponse = await openai.images.generate({
-            model: "gpt-image-2",
-            prompt: strictPrompt,
-            size: "1440x2560",
-            quality: "high",
-          });
-          const imageData = dallEApiResponse?.data?.[0];
-          let gptBase64 = imageData?.url
-            ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
-            : imageData?.b64_json;
+        // --- 1. OpenAI ---
+        if (modelsToRun.includes("gpt")) {
+          let gptFileUrl = "Ошибка";
+          let gptDurationStr = "Ошибка";
+          try {
+            const gptStartTime = performance.now();
+            const dallEApiResponse = await openai.images.generate({
+              model: "gpt-image-2",
+              prompt: strictPrompt,
+              size: mapOpenAiSize(detectedRatio),
+              quality: "high",
+            });
+            const imageData = dallEApiResponse?.data?.[0];
+            let gptBase64 = imageData?.url
+              ? Buffer.from(await (await fetch(imageData.url)).arrayBuffer()).toString("base64")
+              : imageData?.b64_json;
 
-          const gptEndTime = performance.now();
-          gptDurationStr = `${((gptEndTime - gptStartTime) / 1000).toFixed(2)} сек`;
+            gptDurationStr = `${((performance.now() - gptStartTime) / 1000).toFixed(2)} сек`;
 
-          if (gptBase64) {
-            gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
-            const gptRow = [
-              task.cellUrl,
-              `=IMAGE("${gptFileUrl}")`,
-              gptFileUrl,
-              gptDurationStr,
-              "GPT-IMAGE-2",
-              task.prompt,
-            ];
-            await appendRowAndResize(sheets, gptSheetId, gptRow);
+            if (gptBase64) {
+              gptFileUrl = await uploadBase64ToDrive(drive, gptBase64, `gpt_art_${id}.png`, gptFolderId);
+              const gptRow = [
+                task.cellUrl,
+                `=IMAGE("${gptFileUrl}")`,
+                gptFileUrl,
+                gptDurationStr,
+                "GPT-IMAGE-2",
+                task.prompt,
+              ];
+              await appendRowAndResize(sheets, gptSheetId, gptRow);
+            }
+          } catch (e) {
+            console.error(`[GPT Error] Строка ${id}:`, e.message);
           }
-        } catch (e) {
-          console.error(`[GPT-Image Error] Строка ${id}:`, e.message);
         }
 
         // --- 2. GEMINI IMAGEN 4 ULTRA ---
-        let geminiFileUrl = "Ошибка";
-        let geminiDurationStr = "Ошибка";
-        try {
-          const geminiStartTime = performance.now();
-          const imagenBase64 = await generateImagen3(task.prompt);
-          const geminiEndTime = performance.now();
-          geminiDurationStr = `${((geminiEndTime - geminiStartTime) / 1000).toFixed(2)} сек`;
+        if (modelsToRun.includes("gemini")) {
+          let geminiFileUrl = "Ошибка";
+          let geminiDurationStr = "Ошибка";
+          try {
+            const geminiStartTime = performance.now();
+            const imagenBase64 = await generateImagen3(task.prompt);
+            geminiDurationStr = `${((performance.now() - geminiStartTime) / 1000).toFixed(2)} сек`;
 
-          if (imagenBase64) {
-            geminiFileUrl = await uploadBase64ToDrive(
-              drive,
-              imagenBase64,
-              `gemini_ultra_art_${id}.png`,
-              geminiUltraFolderId,
-            );
-            const geminiRow = [
-              task.cellUrl,
-              `=IMAGE("${geminiFileUrl}")`,
-              geminiFileUrl,
-              geminiDurationStr,
-              "IMAGEN 4 ULTRA",
-              task.prompt,
-            ];
-            await appendRowAndResize(sheets, geminiUltraSheetId, geminiRow);
+            if (imagenBase64) {
+              geminiFileUrl = await uploadBase64ToDrive(
+                drive,
+                imagenBase64,
+                `gemini_ultra_art_${id}.png`,
+                geminiUltraFolderId,
+              );
+              const geminiRow = [
+                task.cellUrl,
+                `=IMAGE("${geminiFileUrl}")`,
+                geminiFileUrl,
+                geminiDurationStr,
+                "IMAGEN 4 ULTRA",
+                task.prompt,
+              ];
+              await appendRowAndResize(sheets, geminiUltraSheetId, geminiRow);
+            }
+          } catch (e) {
+            console.error(`[Gemini Ultra Error] Строка ${id}:`, e.message);
           }
-        } catch (e) {
-          console.error(`[Imagen Ultra Error] Строка ${id}:`, e.message);
         }
 
         // --- 3. GEMINI 3 PRO IMAGE ---
-        let gemini3FileUrl = "Ошибка";
-        let gemini3DurationStr = "Ошибка";
-        try {
-          const gemini3StartTime = performance.now();
-          const gemini3Base64 = await generateGemini3ProImage(task.prompt);
-          const gemini3EndTime = performance.now();
-          gemini3DurationStr = `${((gemini3EndTime - gemini3StartTime) / 1000).toFixed(2)} сек`;
+        if (modelsToRun.includes("gemini3")) {
+          let gemini3FileUrl = "Ошибка";
+          let gemini3DurationStr = "Ошибка";
+          try {
+            const gemini3StartTime = performance.now();
+            const gemini3Base64 = await generateGemini3ProImage(task.prompt);
+            gemini3DurationStr = `${((performance.now() - gemini3StartTime) / 1000).toFixed(2)} сек`;
 
-          if (gemini3Base64) {
-            gemini3FileUrl = await uploadBase64ToDrive(
-              drive,
-              gemini3Base64,
-              `gemini3_pro_art_${id}.png`,
-              gemini3FolderId,
-            );
-            const gemini3Row = [
-              task.cellUrl,
-              `=IMAGE("${gemini3FileUrl}")`,
-              gemini3FileUrl,
-              gemini3DurationStr,
-              "GEMINI 3 PRO IMAGE",
-              task.prompt,
-            ];
-            await appendRowAndResize(sheets, gemini3SheetId, gemini3Row);
+            if (gemini3Base64) {
+              gemini3FileUrl = await uploadBase64ToDrive(
+                drive,
+                gemini3Base64,
+                `gemini3_pro_art_${id}.png`,
+                gemini3FolderId,
+              );
+              const gemini3Row = [
+                task.cellUrl,
+                `=IMAGE("${gemini3FileUrl}")`,
+                gemini3FileUrl,
+                gemini3DurationStr,
+                "GEMINI 3 PRO IMAGE",
+                task.prompt,
+              ];
+              await appendRowAndResize(sheets, gemini3SheetId, gemini3Row);
+            }
+          } catch (e) {
+            console.error(`[Gemini 3 Error] Строка ${id}:`, e.message);
           }
-        } catch (e) {
-          console.error(`[Gemini 3 Image Error] Строка ${id}:`, e.message);
         }
 
         task.status = "completed";
         stateData.completedCount++;
       } catch (lineError) {
-        console.error(`[Row Critical Error] Ошибка обработки строки ${id}:`, lineError.message);
         task.status = "failed";
       }
 
-      // ИСПРАВЛЕНО: Синхронизируем стейт на Диске раз в 5 строк или на самом последнем элементе (МИНУС 90% трафика стейта)
       const currentIdx = taskIds.indexOf(id) + 1;
       if (currentIdx % 5 === 0 || currentIdx === taskIds.length) {
         try {
           await updateStateFile(drive, stateFileId, stateData);
-        } catch (e) {
-          console.error("[State Throttling Error]: Временная задержка сохранения стейта на Диск.", e.message);
-        }
+        } catch (e) {}
       }
 
-      // ИСПРАВЛЕНО: Тактовая пауза в 300мс, чтобы Google API успевал очищать лимиты подключений
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
-    const finalSummaryText =
-      `🏁 *Массовая тройная генерация успешно завершена!*\n` +
-      `• Всего промптов: *${stateData.totalCount}*\n` +
-      `• Успешно закрыто строк: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
-      `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
-      `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
-
+    const finalSummaryText = `🏁 *Массовая генерация успешно завершена!*\n• Всего строк: *${stateData.completedCount}/${stateData.totalCount}*\n👉 *Архив:* ${dateFolderUrl}`;
     await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
-    await sendSlackMessage(
-      slackToken,
-      channelId,
-      `❌ *Критический сбой воркера:* \`${criticalWorkerError.message}\``,
-      rootThreadTs,
-    );
+    console.error(criticalWorkerError);
   }
 }
 
 // ========================================================
-// ХЕЛПЕРЫ ВЫЗОВА СЕТЕВЫХ АПИ ГРАФИКИ
+// ХЕЛПЕРЫ API GRAPHICS
 // ========================================================
 async function generateImagen3(clientPrompt) {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "imagen-4.0-ultra-generate-001";
-  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
+  if (!apiKey) throw new Error("GEMINI_API_KEY не задан в .env");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:predict?key=${apiKey}`;
   const response = await fetch(url, {
@@ -803,15 +792,13 @@ async function generateImagen3(clientPrompt) {
 
   if (!response.ok) throw new Error(`Google Imagen API Error: ${response.statusText}`);
   const data = await response.json();
-  const base64Image = data.predictions?.[0]?.bytesBase64Encoded;
-  if (!base64Image) throw new Error("Imagen 4 Ultra API не вернул байты.");
-  return base64Image;
+  return data.predictions?.[0]?.bytesBase64Encoded;
 }
 
 async function generateGemini3ProImage(clientPrompt) {
   const apiKey = process.env.GEMINI_API_KEY;
   const modelName = "gemini-3-pro-image";
-  if (!apiKey) throw new Error("Переменная GEMINI_API_KEY не задана в .env");
+  if (!apiKey) throw new Error("GEMINI_API_KEY не задана в .env");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   const response = await fetch(url, {
@@ -819,20 +806,13 @@ async function generateGemini3ProImage(clientPrompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ parts: [{ text: clientPrompt }] }],
-      generationConfig: {
-        imageConfig: {
-          aspectRatio: "9:16",
-          imageSize: "2K",
-        },
-      },
+      generationConfig: { imageConfig: { aspectRatio: "9:16", imageSize: "2K" } },
     }),
   });
 
-  if (!response.ok) throw new Error(`Google Gemini 3 Pro Image API Error: ${response.statusText}`);
+  if (!response.ok) throw new Error(`Google Gemini 3 Pro API Error: ${response.statusText}`);
   const data = await response.json();
-  const base64Image = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Image) throw new Error("Gemini 3 Pro Image API не вернул байты.");
-  return base64Image;
+  return data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
 }
 
 async function uploadBase64ToDrive(drive, base64Data, filename, parentFolderId) {
