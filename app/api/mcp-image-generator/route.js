@@ -141,18 +141,17 @@ export async function POST(request) {
           text: "❌ *Ошибка синтаксиса:* Значения параметров должны быть строго в кавычках.",
         });
       }
-
       spreadsheetId = args.table_id || null;
       singlePrompt = args.prompt || args.promt || null;
-      selectedModel = args.models || "all";
+      selectedModel = args.models || args.model || "all";
     } else {
       const body = await request.json();
       if (body.prompt) {
         singlePrompt = body.prompt;
-        selectedModel = body.model?.toLowerCase() || "all";
+        selectedModel = (body.model || body.models)?.toLowerCase() || "all";
       } else {
         spreadsheetId = body.spreadsheetId;
-        selectedModel = body.model?.toLowerCase() || "all";
+        selectedModel = (body.model || body.models)?.toLowerCase() || "all";
       }
     }
 
@@ -661,7 +660,7 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
               model: "gpt-image-2",
               prompt: strictPrompt,
               size: mapOpenAiSize(detectedRatio),
-              quality: "high",
+              quality: "medium",
             });
             const imageData = dallEApiResponse?.data?.[0];
             let gptBase64 = imageData?.url
@@ -765,7 +764,13 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
-    const finalSummaryText = `🏁 *Массовая генерация успешно завершена!*\n• Всего строк: *${stateData.completedCount}/${stateData.totalCount}*\n👉 *Архив:* ${dateFolderUrl}`;
+    const finalSummaryText =
+      `🏁 *Массовая тройная генерация завершена!*\n` +
+      `• Всего промптов обработано: *${stateData.totalCount}*\n` +
+      `• Успешно закрыто строк с полным пакетом изображений: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
+      `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
+      `📊 *Инструмент визуального сравнения результатов:* https://imagechecker.malpagames.com/compare?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`;
+
     await sendSlackMessage(slackToken, channelId, finalSummaryText, rootThreadTs);
   } catch (criticalWorkerError) {
     console.error(criticalWorkerError);
