@@ -704,7 +704,7 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
 }
 
 // ========================================================
-// ХЕЛПЕРЫ API GRAPHICS
+// ХЕЛПЕРЫ API GRAPHICS.  
 // ========================================================
 
 async function generateGemini3ProImage(clientPrompt) {
