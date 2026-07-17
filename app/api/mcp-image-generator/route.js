@@ -91,6 +91,7 @@ function parseAspectRatio(promptText) {
 
 function mapOpenAiSize(ratio) {
   const sizeMap = {
+    "2:3": "1280x1920",
     "9:16": "1440x2560",
     "16:9": "2560x1440",
     "1:1": "1920x1920",
@@ -274,7 +275,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
             model: "gpt-image-2",
             prompt: strictPrompt,
             size: mapOpenAiSize(detectedRatio),
-            quality: "high",
+            quality: "medium",
           });
           const imageData = dallEApiResponse?.data?.[0];
           imageBase64 = imageData?.url
