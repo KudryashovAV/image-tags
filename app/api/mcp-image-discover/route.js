@@ -4,11 +4,14 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ID вашей единой базы данных
+// ID базы данных результатов
 const SPREADSHEET_ID = "1Mzi-9Rbhc7dZH7aPJoAFbqhPk8MS5wgqqNkW4LlauKg";
 
-// Список ресурсов для мониторинга (имя ресурса точно соответствует вашему шаблону)
-const MONITORING_RESOURCES = [
+// ID таблицы с настройками (Промпт в A2, Массив объектов ресурсов в JSON формате в B2)
+const CONFIG_SPREADSHEET_ID = "11j4HHjtcpJ6O9OE2FzxWSjfdxPAsnkzbTuGqBYKnjGU";
+
+// Резервный список ресурсов на случай ошибки или пустой ячейки B2
+const DEFAULT_MONITORING_RESOURCES = [
   { name: "Reddit — Jigsaw Puzzles", query: "reddit JigsawPuzzles puzzle art" },
   { name: "Behance — Illustration", query: "behance illustration" },
   { name: "Behance — Nature Illustration", query: "behance nature illustration" },
@@ -26,6 +29,26 @@ const MONITORING_RESOURCES = [
   { name: "Reddit — Amigurumi", query: "reddit Amigurumi crochet" },
 ];
 
+// Резервный промпт на случай, если A2 пуст
+const DEFAULT_PROMPT = `Ты — арт-директор мобильных игр-пазлов. Твоя задача — отобрать референсы.
+Ответь строго в формате JSON: { "suitable": boolean, "reason": "почему выбран или отклонен", "tags": "теги на английском" }.
+
+ПРАВИЛА ОТБОРА (Трендовое изображение должно иметь):
+- необычный/привлекательный сюжет, современную стилистику.
+- хорошо смотрится на превью, понятный главный объект + второстепенные объекты.
+- насыщенная читаемая композиция, различимые передний/задний планы, разнообразные цвета и фактуры.
+- НЕТ пустых больших областей, должно быть достаточно деталей.
+
+ПРЕДПОЧТИТЕЛЬНЫЕ ТЕМЫ:
+природа, фантастические ландшафты, уютные интерьеры, архитектура, сады, еда/выпечка/десерты, миниатюрные миры/кукольные домики, вышивка/амигуруми/рукоделие, cottagecore, стилизованный 3D, сказочная книжная иллюстрация.
+
+СТРОГИЕ ЗАПРЕТЫ (НЕ добавлять если):
+- главный объект — человек, портрет или лицо.
+- основа зависит от текста, логотипов, брендов (или их нельзя обрезать).
+- есть защищенные авторским правом персонажи.
+- большая часть сцены пустая, однотонная или размытая, слишком темная.
+- присутствует сетка пазлов, коробка пазла или фигурные детали.`;
+
 // БУЛЛЕТПРУФ АВТОРИЗАЦИЯ GOOGLE
 async function getGoogleAuth() {
   const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
@@ -40,6 +63,51 @@ async function getGoogleAuth() {
   return { sheets: google.sheets({ version: "v4", auth: oauth2Client }) };
 }
 
+// Загрузка настроек из Google Таблицы Конфигурации (Десериализация B2 как массива)
+async function fetchConfigFromSheet(sheets) {
+  try {
+    console.log(`[Config] Считывание настроек из таблицы ${CONFIG_SPREADSHEET_ID}...`);
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: CONFIG_SPREADSHEET_ID,
+      range: "A2:B2",
+    });
+
+    const rows = res.data.values || [];
+    const promptValue = rows[0]?.[0]?.trim() || null;
+    const resourcesValue = rows[0]?.[1]?.trim() || null;
+
+    let parsedPrompt = promptValue || DEFAULT_PROMPT;
+    let parsedResources = [];
+
+    if (resourcesValue) {
+      try {
+        const jsonArray = JSON.parse(resourcesValue);
+        if (Array.isArray(jsonArray)) {
+          parsedResources = jsonArray.map((item) => ({
+            name: item.name || item.resourceName || "Неизвестный ресурс",
+            query: item.query || item.searchQuery || `${item.name || ""} puzzle art`.trim(),
+          }));
+        } else {
+          console.error("[Config JSON Error] Значение в ячейке B2 не является JSON-массивом.");
+        }
+      } catch (jsonErr) {
+        console.error(`[Config JSON Error] Не удалось десериализовать B2: ${jsonErr.message}`);
+      }
+    }
+
+    if (parsedResources.length === 0) {
+      console.log("[Config Info] Испольуется резервный список ресурсов.");
+      parsedResources = DEFAULT_MONITORING_RESOURCES;
+    }
+
+    console.log(`[Config OK] Загружен промпт (${parsedPrompt.length} символов) и ресурсов: ${parsedResources.length}`);
+    return { prompt: parsedPrompt, resources: parsedResources };
+  } catch (err) {
+    console.error(`[Config Error] Не удалось загрузить конфиг, использую дефолтный: ${err.message}`);
+    return { prompt: DEFAULT_PROMPT, resources: DEFAULT_MONITORING_RESOURCES };
+  }
+}
+
 function getFormattedDate() {
   const now = new Date();
   const pad = (num) => String(num).padStart(2, "0");
@@ -47,7 +115,6 @@ function getFormattedDate() {
 }
 
 function getPastelColorForDay(dayOfWeek) {
-  // 0 - Воскресенье, 1 - Понедельник, ... 6 - Суббота
   const colors = {
     0: { red: 0.9, green: 0.85, blue: 0.95 }, // Фиолетовый
     1: { red: 1.0, green: 0.85, blue: 0.85 }, // Красный
@@ -74,7 +141,7 @@ async function sendSlackResponseUrl(url, text) {
 }
 
 // Пропорциональный сборщик изображений через Serper API
-async function fetchImagesFromResources(targetCount = 100) {
+async function fetchImagesFromResources(resourcesList, targetCount = 100) {
   let fetchedImages = [];
   const serperKey = (process.env.SERPER_API_KEY || "").replace(/['"]/g, "").trim();
 
@@ -83,14 +150,10 @@ async function fetchImagesFromResources(targetCount = 100) {
     return [];
   }
 
-  // Пропорциональный расчет результатов на один источник (базово 20 штук при targetCount = 100)
-  // Не меньше 1 и не больше 100 (ограничение API Serper)
   const numPerResource = Math.max(1, Math.min(100, Math.round(20 * (targetCount / 100))));
-  console.log(
-    `[Serper Fetch] Запрос картинка-кандидатов (по ${numPerResource} шт. на источник для цели ${targetCount})...`,
-  );
+  console.log(`[Serper Fetch] Запрос кандидатов (по ${numPerResource} шт. на источник для цели ${targetCount})...`);
 
-  for (const res of MONITORING_RESOURCES) {
+  for (const res of resourcesList) {
     try {
       console.log(`[Serper Search] Поиск для "${res.name}"...`);
 
@@ -268,6 +331,11 @@ async function backgroundDiscoverProcessor(slackParams = {}) {
   try {
     const { sheets } = await getGoogleAuth();
 
+    // 0. Динамическая загрузка настроек (Промпт из A2, Десериализованный JSON-массив ресурсов из B2)
+    const config = await fetchConfigFromSheet(sheets);
+    const PROMPT = config.prompt;
+    const monitoringResources = config.resources;
+
     // 1. Получаем список листов и проверяем существующие ссылки на ВСЕХ листах (защита от дубликатов)
     let existingUrls = new Set();
     let sheetMetadata = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
@@ -322,8 +390,8 @@ async function backgroundDiscoverProcessor(slackParams = {}) {
       });
     }
 
-    // 3. Собираем свежие картинки с ресурсов (пропорционально заданному TARGET_ANALYSIS_COUNT)
-    const rawCandidates = await fetchImagesFromResources(TARGET_ANALYSIS_COUNT);
+    // 3. Собираем свежие картинки с ресурсов (из загруженного JSON-массива)
+    const rawCandidates = await fetchImagesFromResources(monitoringResources, TARGET_ANALYSIS_COUNT);
 
     // 4. Убираем дубликаты
     const uniqueCandidates = rawCandidates.filter((item) => !existingUrls.has(item.url));
@@ -334,25 +402,6 @@ async function backgroundDiscoverProcessor(slackParams = {}) {
         await sendSlackResponseUrl(responseUrl, "⚠️ Новых изображений на ресурсах не найдено (все уже в базе).");
       return;
     }
-
-    const PROMPT = `Ты — арт-директор мобильных игр-пазлов. Твоя задача — отобрать референсы.
-Ответь строго в формате JSON: { "suitable": boolean, "reason": "почему выбран или отклонен", "tags": "теги на английском" }.
-
-ПРАВИЛА ОТБОРА (Трендовое изображение должно иметь):
-- необычный/привлекательный сюжет, современную стилистику.
-- хорошо смотрится на превью, понятный главный объект + второстепенные объекты.
-- насыщенная читаемая композиция, различимые передний/задний планы, разнообразные цвета и фактуры.
-- НЕТ пустых больших областей, должно быть достаточно деталей.
-
-ПРЕДПОЧТИТЕЛЬНЫЕ ТЕМЫ:
-природа, фантастические ландшафты, уютные интерьеры, архитектура, сады, еда/выпечка/десерты, миниатюрные миры/кукольные домики, вышивка/амигуруми/рукоделие, cottagecore, стилизованный 3D, сказочная книжная иллюстрация.
-
-СТРОГИЕ ЗАПРЕТЫ (НЕ добавлять если):
-- главный объект — человек, портрет или лицо.
-- основа зависит от текста, логотипов, брендов (или их нельзя обрезать).
-- есть защищенные авторским правом персонажи.
-- большая часть сцены пустая, однотонная или размытая, слишком темная.
-- присутствует сетка пазлов, коробка пазла или фигурные детали.`;
 
     const currentDate = getFormattedDate();
     const dayOfWeek = new Date().getDay();
