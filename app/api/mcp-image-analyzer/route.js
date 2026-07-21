@@ -125,7 +125,7 @@ export async function POST(request) {
           const value = match[2] || match[3] || match[4];
           if (key === "ratio") ratio = value;
           if (key === "rules" || key === "правила") rules = value;
-          if (key === "mandatorysuffix" || key === "суффикс") mandatorySuffix = value;
+          if (key === "mandatorysuffix" || key === "суффикс" || key === "mandatory") mandatorySuffix = value;
         }
       }
     } else {
@@ -153,13 +153,13 @@ export async function POST(request) {
           folderId = args.folderId;
           rules = args.rules;
           ratio = args.ratio;
-          mandatorySuffix = args.mandatorySuffix;
+          mandatorySuffix = args.mandatorySuffix || args.mandatory;
         }
       } else {
         folderId = body.folderId;
         rules = body.rules;
         ratio = body.ratio;
-        mandatorySuffix = body.mandatorySuffix;
+        mandatorySuffix = body.mandatorySuffix || body.mandatory;
       }
     }
 
@@ -554,7 +554,8 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
 
   const rules = finalConfig.rules || "Создавай максимально подробный и точный промпт.";
   const ratio = finalConfig.ratio || "2:3";
-  const mandatorySuffix = finalConfig.mandatorySuffix || "Все элементы должны быть чёткими. Формат 2:3";
+  const mandatorySuffix =
+    finalConfig.mandatorySuffix || finalConfig.mandatory || "Все элементы должны быть чёткими. Формат 2:3";
 
   const systemPrompt = `Ты — эксперт. Выдай строго валидный JSON-объект, где ключами являются ID картинок, а значениями — объекты с полями "description", "prompt" и "tags".
 Правила: ${rules}
