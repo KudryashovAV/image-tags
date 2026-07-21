@@ -4,8 +4,27 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ID целевой папки на Google Диске, куда будут строго складываться результаты отбора
-const TARGET_FOLDER_ID = "1rAvPr07VHcUZqVkpbo2CA7dsQwMZjjj6";
+// ID вашей единой базы данных
+const SPREADSHEET_ID = "1Mzi-9Rbhc7dZH7aPJoAFbqhPk8MS5wgqqNkW4LlauKg";
+
+// Список ресурсов для мониторинга (имя ресурса точно соответствует вашему шаблону)
+const MONITORING_RESOURCES = [
+  { name: "Reddit — Jigsaw Puzzles", query: "reddit JigsawPuzzles puzzle art" },
+  { name: "Behance — Illustration", query: "behance illustration" },
+  { name: "Behance — Nature Illustration", query: "behance nature illustration" },
+  { name: "Reddit — EarthPorn", query: "reddit EarthPorn landscape photo" },
+  { name: "Reddit — Imaginary Landscapes", query: "reddit ImaginaryLandscapes art" },
+  { name: "Reddit — Cozy Places", query: "reddit CozyPlaces interior" },
+  { name: "Reddit — RoomPorn", query: "reddit RoomPorn interior" },
+  { name: "Behance — Cozy Illustration", query: "behance cozy illustration" },
+  { name: "Reddit — Cottagecore", query: "reddit cottagecore aesthetic" },
+  { name: "Reddit — FoodPorn", query: "reddit FoodPorn photo" },
+  { name: "Reddit — ArchitecturePorn", query: "reddit ArchitecturePorn building" },
+  { name: "Behance — Architecture Illustration", query: "behance Architecture illustration" },
+  { name: "Reddit — Miniatures", query: "reddit miniatures art" },
+  { name: "Reddit — Embroidery", query: "reddit Embroidery art" },
+  { name: "Reddit — Amigurumi", query: "reddit Amigurumi crochet" },
+];
 
 // БУЛЛЕТПРУФ АВТОРИЗАЦИЯ GOOGLE
 async function getGoogleAuth() {
@@ -18,19 +37,29 @@ async function getGoogleAuth() {
   } catch (e) {
     throw new Error(`Google OAuth Refresh Failed: ${e.message}`);
   }
-  return {
-    sheets: google.sheets({ version: "v4", auth: oauth2Client }),
-    drive: google.drive({ version: "v3", auth: oauth2Client }),
-  };
+  return { sheets: google.sheets({ version: "v4", auth: oauth2Client }) };
 }
 
-function getFormattedDateTime() {
+function getFormattedDate() {
   const now = new Date();
   const pad = (num) => String(num).padStart(2, "0");
-  return `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
 }
 
-// Вспомогательная функция отправки ответов через response_url Slack
+function getPastelColorForDay(dayOfWeek) {
+  // 0 - Воскресенье, 1 - Понедельник, ... 6 - Суббота
+  const colors = {
+    0: { red: 0.9, green: 0.85, blue: 0.95 }, // Фиолетовый
+    1: { red: 1.0, green: 0.85, blue: 0.85 }, // Красный
+    2: { red: 1.0, green: 0.9, blue: 0.8 }, // Оранжевый
+    3: { red: 1.0, green: 1.0, blue: 0.8 }, // Желтый
+    4: { red: 0.85, green: 0.95, blue: 0.85 }, // Зеленый
+    5: { red: 0.85, green: 0.95, blue: 1.0 }, // Голубой
+    6: { red: 0.8, green: 0.85, blue: 0.95 }, // Синий
+  };
+  return colors[dayOfWeek];
+}
+
 async function sendSlackResponseUrl(url, text) {
   if (!url) return;
   try {
@@ -40,181 +69,335 @@ async function sendSlackResponseUrl(url, text) {
       body: JSON.stringify({ response_type: "in_channel", text: text }),
     });
   } catch (e) {
-    console.error("[Slack API Error response_url]:", e.message);
+    console.error("[Slack API Error]:", e.message);
   }
 }
 
-// ========================================================
-// 1. КАНАЛ СВЯЗИ GET: Для браузера, curl или крона
-// ========================================================
-export async function GET(request) {
-  try {
-    const { searchParams } = request.nextUrl;
-    const rawQuery = searchParams.get("query") || null;
+// Пропорциональный сборщик изображений через Serper API
+async function fetchImagesFromResources(targetCount = 100) {
+  let fetchedImages = [];
+  const serperKey = (process.env.SERPER_API_KEY || "").replace(/['"]/g, "").trim();
 
-    let searchTerms = [];
-    if (rawQuery && rawQuery.trim()) {
-      searchTerms = rawQuery
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean);
-    }
-
-    // Запускаем тяжелый процессор в фоне (БЕЗ await!)
-    backgroundDiscoverProcessor(searchTerms, { responseUrl: null });
-
-    return NextResponse.json({
-      success: true,
-      message: `Фоновый процесс исследования успешно развернут на бэкенде. Получено трендов: ${searchTerms.length || "0 (включен авто-режим ИИ)"}`,
-    });
-  } catch (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!serperKey) {
+    console.error("[Serper Error] SERPER_API_KEY не найден в process.env!");
+    return [];
   }
-}
 
-// ========================================================
-// 2. КАНАЛ СВЯЗИ POST: Специфично для Slash-команд Slack
-// ========================================================
-export async function POST(request) {
-  try {
-    const contentType = request.headers.get("content-type") || "";
+  // Пропорциональный расчет результатов на один источник (базово 20 штук при targetCount = 100)
+  // Не меньше 1 и не больше 100 (ограничение API Serper)
+  const numPerResource = Math.max(1, Math.min(100, Math.round(20 * (targetCount / 100))));
+  console.log(
+    `[Serper Fetch] Запрос картинка-кандидатов (по ${numPerResource} шт. на источник для цели ${targetCount})...`,
+  );
 
-    if (!contentType.includes("application/x-www-form-urlencoded")) {
-      return NextResponse.json({ error: "Only urlencoded requests allowed for POST" }, { status: 400 });
-    }
+  for (const res of MONITORING_RESOURCES) {
+    try {
+      console.log(`[Serper Search] Поиск для "${res.name}"...`);
 
-    const formData = await request.formData();
-    const slackText = (formData.get("text") || "").trim();
-    const responseUrl = formData.get("response_url")?.toString() || null;
-
-    let searchTerms = [];
-
-    if (slackText) {
-      const match = slackText.match(/trends=(?:"([^"]*)"|'([^']*)'|(\S+))/i);
-      let rawTrends = "";
-
-      if (match) {
-        rawTrends = match[1] || match[2] || match[3];
-      } else {
-        rawTrends = slackText;
-      }
-
-      if (rawTrends && rawTrends.trim()) {
-        searchTerms = rawTrends
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean);
-      }
-    }
-
-    // Запускаем процессор в фоне
-    backgroundDiscoverProcessor(searchTerms, { responseUrl });
-
-    return new Response(
-      `⏳ *Запрос на исследование принят!* Разворачиваю ИИ-воркера на сервере.\n` +
-        `Исследуемые темы: ${searchTerms.length > 0 ? `\`${searchTerms.join(", ")}\`` : `_генерация мета-трендов через GPT-4о_`}.\n` +
-        `Ожидайте финальный отчет со ссылкой на Google Таблицу прямо здесь...`,
-      { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } },
-    );
-  } catch (error) {
-    console.error("Slack POST discover error:", error);
-    return new Response(`❌ Ошибка запуска команды: ${error.message}`, { status: 200 });
-  }
-}
-
-// ========================================================
-// 3. АСИНХРОННЫЙ ФОНОВЫЙ ПРОЦЕССОР (ДВИЖОК ИССЛЕДОВАНИЯ)
-// ========================================================
-async function backgroundDiscoverProcessor(initialSearchTerms, slackParams = {}) {
-  const { responseUrl } = slackParams;
-  let searchTerms = [...initialSearchTerms];
-
-  console.log(`[Discover Worker] Старт процесса. Передано ручных трендов: ${searchTerms.length}`);
-
-  try {
-    // ШАГ 1: Если ручных трендов нет — генерируем их через ИИ
-    if (searchTerms.length === 0) {
-      const trendAnalysisPrompt = `Ты — ведущий ИИ-маркетолог и контент-стратег мобильных casual-игр. 
-Твоя задача — провести анализ визуальных трендов и сгенерировать СТРОГО 5 уникальных, высокодетализированных и коммерчески успешных тем для картинок-пазлов.
-
-Картинка для пазла ДОЛЖНА содержать сотни мелких, четких, разноцветных объектов и текстур, чтобы ее было интересно собирать. Avoid огромных однотонных пространств.
-
-Сгенерируй ровно 5 тем, строго распределив их по следующим категориям:
-1. ВЕЧНЫЕ ТРЕНДЫ (2 темы) — уютные, детализированные, сказочные или природные локации.
-2. ТЕКУЩАЯ МЕТА (2 темы) — соларпанк, высокодетализированная неоновая изометрия, биофильного футуризма или "cozy gaming" арт.
-3. КЛАССИКА (1 тема) — стилизация под классическое изобразительное искусство, винтаж или голландский натюрморт с обилием деталей.
-
-Выдай ответ СТРОГО в формате JSON-объекта (Output strictly in valid JSON format) с ключом "themes":
-{
-  "themes": [
-    "Первая тема",
-    "Вторая тема",
-    "Третья тема",
-    "Четвертая тема",
-    "Пятая тема"
-  ]
-}`;
-
-      const gptThemes = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [{ role: "system", content: trendAnalysisPrompt }],
-        response_format: { type: "json_object" },
-      });
-
-      const parsedData = JSON.parse(gptThemes.choices[0].message.content);
-      searchTerms = parsedData.themes || [];
-    }
-
-    // ШАГ 2: Поиск картинок в сети через Serper API
-    let rawImageUrls = [];
-    for (const term of searchTerms) {
-      console.log(`[Discover Worker] Поиск картинок в Serper API по теме: "${term}"`);
       const response = await fetch("https://google.serper.dev/images", {
         method: "POST",
         headers: {
-          "X-API-KEY": process.env.SERPER_API_KEY,
+          "X-API-KEY": serperKey,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ q: term, gl: "us", hl: "en", num: 20 }),
+        body: JSON.stringify({ q: res.query, num: numPerResource }),
       });
+
+      if (!response.ok) {
+        const errDetails = await response.text();
+        console.error(`[Serper Error] ${res.name} (Status ${response.status}): ${errDetails}`);
+        continue;
+      }
+
       const data = await response.json();
-      if (data.images) {
-        data.images.forEach((img) => rawImageUrls.push({ url: img.imageUrl, title: img.title }));
+      if (data.images && data.images.length > 0) {
+        data.images.forEach((img) => {
+          fetchedImages.push({ url: img.imageUrl, source: res.name });
+        });
+        console.log(`[Serper OK] ${res.name}: зацеплено ${data.images.length} картинок`);
+      }
+    } catch (e) {
+      console.error(`[Fetch Error] Ошибка сбора с ${res.name}:`, e.message);
+    }
+  }
+
+  return fetchedImages.sort(() => 0.5 - Math.random());
+}
+
+// Вспомогательная функция МГНОВЕННОЙ записи и форматирования ОДНОГО кандидата
+async function appendAndFormatSingleCandidate({ sheets, spreadsheetId, sheetId, sheetTitle, candidate, dateColor }) {
+  const row = [
+    candidate.url,
+    `=IMAGE("${candidate.url}")`,
+    candidate.tags,
+    candidate.reason,
+    candidate.source,
+    candidate.date,
+    "FALSE",
+  ];
+
+  const appendResponse = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `'${sheetTitle}'!A1`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+
+  const updatedRange = appendResponse.data.updates.updatedRange;
+  const rangeMatch = updatedRange.match(/!A(\d+):[A-Z](\d+)/);
+
+  if (rangeMatch) {
+    const startRow = parseInt(rangeMatch[1], 10) - 1;
+    const endRow = parseInt(rangeMatch[2], 10);
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateDimensionProperties: {
+              range: { sheetId, dimension: "ROWS", startIndex: startRow, endIndex: endRow },
+              properties: { pixelSize: 250 },
+              fields: "pixelSize",
+            },
+          },
+          {
+            updateDimensionProperties: {
+              range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
+              properties: { pixelSize: 250 },
+              fields: "pixelSize",
+            },
+          },
+          {
+            setDataValidation: {
+              range: {
+                sheetId,
+                startRowIndex: startRow,
+                endRowIndex: endRow,
+                startColumnIndex: 6,
+                endColumnIndex: 7,
+              },
+              rule: { condition: { type: "BOOLEAN" }, showCustomUi: true },
+            },
+          },
+          {
+            repeatCell: {
+              range: {
+                sheetId,
+                startRowIndex: startRow,
+                endRowIndex: endRow,
+                startColumnIndex: 5,
+                endColumnIndex: 6,
+              },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: dateColor,
+                  textFormat: { foregroundColor: { red: 0.0, green: 0.0, blue: 0.0 } },
+                },
+              },
+              fields: "userEnteredFormat(backgroundColor,textFormat)",
+            },
+          },
+        ],
+      },
+    });
+  }
+}
+
+// 1. КАНАЛ GET (Парсит ?count=N и ?silent=true)
+export async function GET(request) {
+  const { searchParams } = request.nextUrl;
+
+  const rawCount = searchParams.get("count");
+  const count = rawCount && !isNaN(parseInt(rawCount, 10)) ? parseInt(rawCount, 10) : 100;
+
+  const rawSilent = searchParams.get("silent");
+  const isSilent = rawSilent === "true" || rawSilent === "1";
+
+  backgroundDiscoverProcessor({ responseUrl: null, targetCount: count, isSilent });
+  return NextResponse.json({
+    success: true,
+    message: `Фоновый поиск ${count} изображений запущен (Тихий режим: ${isSilent ? "ВКЛ" : "ВЫКЛ"}).`,
+  });
+}
+
+// 2. КАНАЛ POST (Парсит count и silent из form-data или текста Slack)
+export async function POST(request) {
+  try {
+    const formData = await request.formData();
+    const responseUrl = formData.get("response_url")?.toString() || null;
+    const slackText = (formData.get("text") || "").trim();
+    const rawCountParam = formData.get("count")?.toString();
+    const rawSilentParam = formData.get("silent")?.toString();
+
+    let count = 100;
+    let isSilent = rawSilentParam === "true" || rawSilentParam === "1";
+
+    if (rawCountParam && !isNaN(parseInt(rawCountParam, 10))) {
+      count = parseInt(rawCountParam, 10);
+    } else if (slackText) {
+      const countMatch = slackText.match(/count=(\d+)/i) || slackText.match(/^(\d+)$/);
+      if (countMatch) count = parseInt(countMatch[1], 10);
+    }
+
+    if (slackText && /silent=(true|1)/i.test(slackText)) {
+      isSilent = true;
+    }
+
+    backgroundDiscoverProcessor({ responseUrl, targetCount: count, isSilent });
+    return new Response(
+      `⏳ *Сбор трендов запущен!* Проверяю ресурсы на наличие ${count} новых артов...\n` +
+        `Результаты будут добавляться в общую таблицу. ${isSilent ? "_Уведомление по завершении отключено (silent mode)._" : "Ожидайте уведомления по завершении."}`,
+      { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+    );
+  } catch (error) {
+    return new Response(`❌ Ошибка запуска: ${error.message}`, { status: 200 });
+  }
+}
+
+// 3. ФОНОВЫЙ ПРОЦЕССОР
+async function backgroundDiscoverProcessor(slackParams = {}) {
+  const { responseUrl, targetCount = 100, isSilent = false } = slackParams;
+  const TARGET_ANALYSIS_COUNT = Math.max(1, targetCount);
+
+  console.log(
+    `[Discover] Старт сбора изображений. Цель для анализа: ${TARGET_ANALYSIS_COUNT}. Режим Silent: ${isSilent}`,
+  );
+
+  try {
+    const { sheets } = await getGoogleAuth();
+
+    // 1. Получаем список листов и проверяем существующие ссылки на ВСЕХ листах (защита от дубликатов)
+    let existingUrls = new Set();
+    let sheetMetadata = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    let sheetList = sheetMetadata.data.sheets || [];
+
+    for (const sheetObj of sheetList) {
+      const title = sheetObj.properties.title;
+      try {
+        const dbResponse = await sheets.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `'${title}'!A:A`,
+        });
+        if (dbResponse.data.values) {
+          dbResponse.data.values.forEach((row) => {
+            if (row[0]) existingUrls.add(row[0]);
+          });
+        }
+      } catch (e) {
+        console.log(`Лист "${title}" пуст или недоступен.`);
       }
     }
 
-    // ШАГ 3: Фильтрация через GPT Vision (БЕЗОПАСНЫЙ СКАЧИВАЕМЫЙ МЕТОД)
-    const approvedCandidates = [];
-    const uniqueImages = Array.from(new Map(rawImageUrls.map((item) => [item.url, item])).values());
+    // 2. Проверяем наличие 2-го листа для отклоненных изображений (создаем, если нет)
+    let sheet1 = sheetList[0];
+    let sheet2 = sheetList.length > 1 ? sheetList[1] : null;
 
-    console.log(
-      `[Discover Worker] Всего найдено уникальных картинок: ${uniqueImages.length}. Начинаю фильтрацию ИИ...`,
-    );
+    if (!sheet2) {
+      console.log("[Discover] Вторые листы не найдены. Создаю лист 'Отклонено'...");
+      const addSheetRes = await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SPREADSHEET_ID,
+        requestBody: {
+          requests: [
+            {
+              addSheet: {
+                properties: { title: "Отклонено" },
+              },
+            },
+          ],
+        },
+      });
+      sheet2 = addSheetRes.data.replies[0].addSheet;
 
-    for (const img of uniqueImages) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `'${sheet2.properties.title}'!A1`,
+        valueInputOption: "USER_ENTERED",
+        requestBody: {
+          values: [
+            ["Ссылка на оригинал", "Превью", "Теги", "Почему отклонён", "Ресурс", "Дата исследования", "Одобрено"],
+          ],
+        },
+      });
+    }
+
+    // 3. Собираем свежие картинки с ресурсов (пропорционально заданному TARGET_ANALYSIS_COUNT)
+    const rawCandidates = await fetchImagesFromResources(TARGET_ANALYSIS_COUNT);
+
+    // 4. Убираем дубликаты
+    const uniqueCandidates = rawCandidates.filter((item) => !existingUrls.has(item.url));
+    console.log(`[Discover] Найдено уникальных кандидатов (новых): ${uniqueCandidates.length}.`);
+
+    if (uniqueCandidates.length === 0) {
+      if (responseUrl && !isSilent)
+        await sendSlackResponseUrl(responseUrl, "⚠️ Новых изображений на ресурсах не найдено (все уже в базе).");
+      return;
+    }
+
+    const PROMPT = `Ты — арт-директор мобильных игр-пазлов. Твоя задача — отобрать референсы.
+Ответь строго в формате JSON: { "suitable": boolean, "reason": "почему выбран или отклонен", "tags": "теги на английском" }.
+
+ПРАВИЛА ОТБОРА (Трендовое изображение должно иметь):
+- необычный/привлекательный сюжет, современную стилистику.
+- хорошо смотрится на превью, понятный главный объект + второстепенные объекты.
+- насыщенная читаемая композиция, различимые передний/задний планы, разнообразные цвета и фактуры.
+- НЕТ пустых больших областей, должно быть достаточно деталей.
+
+ПРЕДПОЧТИТЕЛЬНЫЕ ТЕМЫ:
+природа, фантастические ландшафты, уютные интерьеры, архитектура, сады, еда/выпечка/десерты, миниатюрные миры/кукольные домики, вышивка/амигуруми/рукоделие, cottagecore, стилизованный 3D, сказочная книжная иллюстрация.
+
+СТРОГИЕ ЗАПРЕТЫ (НЕ добавлять если):
+- главный объект — человек, портрет или лицо.
+- основа зависит от текста, логотипов, брендов (или их нельзя обрезать).
+- есть защищенные авторским правом персонажи.
+- большая часть сцены пустая, однотонная или размытая, слишком темная.
+- присутствует сетка пазлов, коробка пазла или фигурные детали.`;
+
+    const currentDate = getFormattedDate();
+    const dayOfWeek = new Date().getDay();
+    const dateColor = getPastelColorForDay(dayOfWeek);
+
+    let successfullyAnalyzedCount = 0;
+    let approvedCount = 0;
+    let rejectedCount = 0;
+    let candidateIndex = 0;
+
+    console.log(`[Discover] Начинаем отбор. Цель: успешно проанализировать ${TARGET_ANALYSIS_COUNT} изображений.`);
+
+    // 5. Динамический добор кандидатов, Анализ и МГНОВЕННАЯ запись в Google Таблицу
+    while (successfullyAnalyzedCount < TARGET_ANALYSIS_COUNT && candidateIndex < uniqueCandidates.length) {
+      const img = uniqueCandidates[candidateIndex];
+      candidateIndex++;
+
       try {
-        console.log(`[Discover Worker] Скачиваю картинку на сервер для буферизации: ${img.url}`);
+        let downloadUrl = img.url;
 
-        // Нативно скачиваем картинку на свой сервер с таймаутом, обходя блокировки OpenAI
-        const imgResponse = await fetch(img.url, {
+        if (downloadUrl.includes("i.redd.it") && downloadUrl.includes("width=")) {
+          downloadUrl = downloadUrl.replace(/width=\d+/, "width=1024");
+        }
+
+        console.log(
+          `[Discover Worker] Анализ (${successfullyAnalyzedCount + 1}/${TARGET_ANALYSIS_COUNT}). Кандидат ${candidateIndex}/${uniqueCandidates.length}: ${downloadUrl}`,
+        );
+
+        const imgResponse = await fetch(downloadUrl, {
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
           },
-          signal: AbortSignal.timeout(12000), // Защита от зависших серверов (12 секунд на загрузку)
+          signal: AbortSignal.timeout(25000),
         });
 
         if (!imgResponse.ok) {
-          console.log(
-            `[Discover Skip] Ссылка заблокирована сервером-донором (Status ${imgResponse.status}): ${img.url}`,
-          );
+          console.log(`[Discover Skip] Сервер вернул статус ${imgResponse.status}, берем следующего.`);
           continue;
         }
 
         const mimeType = imgResponse.headers.get("content-type") || "image/jpeg";
-        // Проверяем, что нам вернули именно изображение, а не HTML-страницу ошибки
         if (!mimeType.includes("image/")) {
-          console.log(`[Discover Skip] Ссылка вернула некорректный тип данных (${mimeType}): ${img.url}`);
+          console.log(`[Discover Skip] Некорректный тип данных (${mimeType}), берем следующего.`);
           continue;
         }
 
@@ -222,149 +405,92 @@ async function backgroundDiscoverProcessor(initialSearchTerms, slackParams = {})
         const base64Data = Buffer.from(arrayBuffer).toString("base64");
         const dataUri = `data:${mimeType};base64,${base64Data}`;
 
-        console.log(`[Discover Worker] Картинка успешно конвертирована в Base64. Отправляю байты в OpenAI...`);
-
-        // Передаем в OpenAI чистый Base64 код, полностью исключая внешние скачивания
         const check = await openai.chat.completions.create({
           model: "gpt-4o-mini",
           messages: [
-            {
-              role: "system",
-              content: `Ты — эксперт по мобильным играм-пазлам. Оцени, подходит ли это изображение для разрезания на 100+ элементов пазла.
-Критерии хорошего пазла: высокая детализация, many мелких уникальных объектов, сочные контрастные цвета, четкие границы, НЕТ огромных монотонных областей (однотонное небо, голая стена), НЕТ сильного размытия (bokeh).
-Ответь строго в формате JSON (Output strictly in valid JSON format): 
-{ 
-  "suitable": true или false, 
-  "reason": "кратко почему", 
-  "tags": "3-5 тегов через запятую" 
-}`,
-            },
-            {
-              role: "user",
-              // ИСПРАВЛЕНО: Вместо img.url мы строго скармливаем переменную dataUri
-              content: [{ type: "image_url", image_url: { url: dataUri, detail: "low" } }],
-            },
+            { role: "system", content: PROMPT },
+            { role: "user", content: [{ type: "image_url", image_url: { url: dataUri, detail: "low" } }] },
           ],
           response_format: { type: "json_object" },
         });
 
+        successfullyAnalyzedCount++;
         const result = JSON.parse(check.choices[0].message.content);
+
+        const candidateData = {
+          url: img.url,
+          tags: result.tags,
+          reason: result.reason,
+          source: img.source,
+          date: currentDate,
+        };
+
         if (result.suitable) {
-          console.log(`[Discover Approve] Картинка подходит! Причина: ${result.reason}`);
-          approvedCandidates.push({ url: img.url, reason: result.reason, tags: result.tags });
+          console.log(`[Discover Approve] 🟩 Одобрено ИИ! Сразу сохраняю на Лист 1...`);
+          approvedCount++;
+          try {
+            await appendAndFormatSingleCandidate({
+              sheets,
+              spreadsheetId: SPREADSHEET_ID,
+              sheetId: sheet1.properties.sheetId,
+              sheetTitle: sheet1.properties.title,
+              candidate: candidateData,
+              dateColor,
+            });
+          } catch (writeErr) {
+            console.error(`[Google Sheet Write Error - Approve]: ${writeErr.message}`);
+          }
+        } else {
+          console.log(`[Discover Reject] 🟥 Отклонено ИИ (${result.reason}). Сразу сохраняю на Лист 2...`);
+          rejectedCount++;
+          try {
+            await appendAndFormatSingleCandidate({
+              sheets,
+              spreadsheetId: SPREADSHEET_ID,
+              sheetId: sheet2.properties.sheetId,
+              sheetTitle: sheet2.properties.title,
+              candidate: candidateData,
+              dateColor,
+            });
+          } catch (writeErr) {
+            console.error(`[Google Sheet Write Error - Reject]: ${writeErr.message}`);
+          }
         }
       } catch (err) {
-        // Ошибка логируется локально, не прерывая общую очередь
-        console.error(`Ошибка анализа картинки ${img.url}:`, err.message);
+        console.error(`[Discover Error] Сбой при обработке: ${err.message}`);
       }
     }
 
-    if (approvedCandidates.length === 0) {
-      const emptyMsg =
-        "⚠️ Исследование завершено, но подходящих под строгий формат пазлов картинок сегодня не найдено.";
-      if (responseUrl) await sendSlackResponseUrl(responseUrl, emptyMsg);
-      return;
+    console.log(
+      `[Discover] Анализ и запись завершены. Проверено: ${successfullyAnalyzedCount}/${TARGET_ANALYSIS_COUNT}. Одобрено: ${approvedCount}, Отклонено: ${rejectedCount}`,
+    );
+
+    // 6. Оповещение об успехе в Slack
+    if (!isSilent) {
+      const finalReport =
+        `🏁 *Отбор трендов успешно завершен!*\n\n` +
+        `🔍 Проверено новых ссылок: *${successfullyAnalyzedCount}* (цель: ${TARGET_ANALYSIS_COUNT})\n` +
+        `✅ Одобрено ИИ (Лист 1): *${approvedCount}*\n` +
+        `❌ Отклонено ИИ (Лист 2): *${rejectedCount}*\n\n` +
+        `👉 *Ссылка на общую таблицу:* https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}`;
+
+      if (responseUrl) {
+        await sendSlackResponseUrl(responseUrl, finalReport);
+      }
+
+      if (process.env.DESIGN_SLACK_WEBHOOK) {
+        await fetch(process.env.DESIGN_SLACK_WEBHOOK, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: finalReport }),
+        });
+      }
+    } else {
+      console.log("[Discover] Флаг silent=true активирован. Сообщение в Slack пропущено.");
     }
-
-    // ШАГ 4: Авторизация и Создание Google Таблицы
-    const { sheets, drive } = await getGoogleAuth();
-    const dateTimeStr = getFormattedDateTime();
-    const trendsListStr = searchTerms.join(", ");
-    const sheetTitle = `Исследование от ${dateTimeStr} изображений по трендам ${trendsListStr}`;
-
-    const newSheet = await sheets.spreadsheets.create({
-      requestBody: {
-        properties: { title: sheetTitle },
-        sheets: [{ properties: { title: "Отбор", sheetId: 0 } }],
-      },
-    });
-    const spreadsheetId = newSheet.data.spreadsheetId;
-    const spreadsheetUrl = newSheet.data.spreadsheetUrl;
-
-    // Переносим созданную таблицу в фиксированную папку исследования
-    try {
-      const fileToken = await drive.files.get({ fileId: spreadsheetId, fields: "parents" });
-      const previousParents = fileToken.data.parents ? fileToken.data.parents.join(",") : "";
-      await drive.files.update({
-        fileId: spreadsheetId,
-        addParents: TARGET_FOLDER_ID,
-        removeParents: previousParents,
-        fields: "id, parents",
-      });
-    } catch (moveErr) {
-      console.error("Ошибка перемещения таблицы:", moveErr.message);
-    }
-
-    // Заполняем таблицу данными кандидатов
-    const rows = [["Ссылка на оригинал", "Превью", "Теги", "Почему выбран", "Одобрено"]];
-    approvedCandidates.forEach((c) => {
-      rows.push([c.url, `=IMAGE("${c.url}")`, c.tags, c.reason, false]);
-    });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: "Отбор!A1",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: rows },
-    });
-
-    // Настраиваем интерактивные чекбоксы и авторазмеры
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            setDataValidation: {
-              range: { sheetId: 0, startRowIndex: 1, endRowIndex: rows.length, startColumnIndex: 4, endColumnIndex: 5 },
-              rule: { condition: { type: "BOOLEAN" }, showCustomUi: true },
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: 0, dimension: "ROWS", startIndex: 1, endIndex: rows.length },
-              properties: { pixelSize: 250 },
-              fields: "pixelSize",
-            },
-          },
-          {
-            updateDimensionProperties: {
-              range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
-              properties: { pixelSize: 250 },
-              fields: "pixelSize",
-            },
-          },
-        ],
-      },
-    });
-
-    // Открываем доступ по ссылке на редактирование
-    await drive.permissions.create({ fileId: spreadsheetId, requestBody: { role: "writer", type: "anyone" } });
-
-    // ШАГ 5: Публикуем финальные результаты
-    const finalReportText =
-      `🏁 *Исследование трендов успешно завершено!*\n\n` +
-      `📈 *Итоги:* \n` +
-      `• Проверено тем: *${searchTerms.length}*\n` +
-      `• Одобрено ИИ-экспертом кандидатов: *${approvedCandidates.length}*\n\n` +
-      `📂 Все результаты аккуратно сохранены в вашу общую папку исследований.\n` +
-      `👉 *Ссылка на таблицу отбора (поставь галочки):* ${spreadsheetUrl}`;
-
-    if (responseUrl) {
-      await sendSlackResponseUrl(responseUrl, finalReportText);
-    }
-
-    if (process.env.DESIGN_SLACK_WEBHOOK) {
-      await fetch(process.env.DESIGN_SLACK_WEBHOOK, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: finalReportText }),
-      });
-    }
-
-    console.log(`[Discover Worker] Успешно завершено! Таблица: ${spreadsheetId}`);
-  } catch (fatalBgError) {
-    console.error("[Fatal Discover Worker Error]:", fatalBgError.message);
-    const failMsg = `❌ *Критическая ошибка исследования:* \`${fatalBgError.message}\``;
-    if (responseUrl) await sendSlackResponseUrl(responseUrl, failMsg);
+  } catch (error) {
+    console.error("[Fatal Error]:", error.message);
+    if (responseUrl && !isSilent)
+      await sendSlackResponseUrl(responseUrl, `❌ *Критическая ошибка:* \`${error.message}\``);
   }
 }
