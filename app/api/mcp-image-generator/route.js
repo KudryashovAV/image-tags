@@ -427,8 +427,15 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
     for (let i = 1; i < rows.length; i++) {
       const prompt = rows[i][promptColIndex];
       if (prompt && prompt.trim()) {
+        const trimmedPrompt = prompt.trim();
+
+        // 🛑 Пропускаем промпты с текстом "Ошибка ИИ"
+        if (trimmedPrompt.toLowerCase() === "ошибка ии") {
+          continue;
+        }
+
         const cellUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${firstSheetId}&range=${promptColLetter}${i + 1}`;
-        tasks.push({ id: i, prompt: prompt.trim(), cellUrl });
+        tasks.push({ id: i, prompt: trimmedPrompt, cellUrl });
       }
     }
 
