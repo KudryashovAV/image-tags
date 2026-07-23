@@ -387,7 +387,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
         }
 
         const imagesToProcess = images.filter((img) => !analyzedImageIds.has(img.webViewLink));
-        const batchSize = 5;
+        const batchSize = 2;
 
         for (let i = 0; i < imagesToProcess.length; i += batchSize) {
           const chunk = imagesToProcess.slice(i, i + batchSize);
@@ -414,20 +414,37 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
           const validImages = preparedImages.filter((img) => img !== null);
           if (validImages.length === 0) continue;
 
+          // 2. Улучшенный повторный запрос (3 попытки с нарастающей паузой)
           let gptResults = {};
-          try {
-            gptResults = await analyzeImagesWithGPT(validImages, finalConfig);
-          } catch (openaiErr) {
-            await new Promise((r) => setTimeout(r, 5000));
+          let success = false;
+
+          for (let attempt = 1; attempt <= 3; attempt++) {
             try {
               gptResults = await analyzeImagesWithGPT(validImages, finalConfig);
-            } catch (e) {
-              continue;
+              success = true;
+              break;
+            } catch (openaiErr) {
+              console.error(`[OpenAI Attempt ${attempt}/3 Failed]:`, openaiErr.message);
+              if (attempt < 3) {
+                await new Promise((r) => setTimeout(r, attempt * 4000)); // Пауза 4s, затем 8s
+              }
             }
           }
 
-          const rowsToAppend = validImages.map((img) => {
-            const gptData = gptResults[img.id] || { description: "Ошибка ИИ", prompt: "Ошибка ИИ", tags: "" };
+          if (!success) {
+            console.error("[OpenAI Error]: Все 3 попытки анализа завершились ошибкой.");
+          }
+
+          // 3. Безопасное сопоставление по индексу (image_0, image_1) или по ID
+          const rowsToAppend = validImages.map((img, index) => {
+            const keyByIndex = `image_${index}`;
+            const gptData = gptResults[keyByIndex] ||
+              gptResults[img.id] || {
+                description: "Ошибка ИИ (Превышен таймаут/лимит)",
+                prompt: "Ошибка ИИ (Превышен таймаут/лимит)",
+                tags: "error",
+              };
+
             return [
               img.link,
               `=IMAGE("https://drive.google.com/thumbnail?id=${img.id}&sz=w500")`,
@@ -576,8 +593,9 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
 }
 
 async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
-  const imageContentBlocks = imagesChunk.flatMap((img) => [
-    { type: "text", text: `IMAGE_ID_START:${img.id}` },
+  // Передаем ИИ простые и четкие метки: image_0, image_1
+  const imageContentBlocks = imagesChunk.flatMap((img, index) => [
+    { type: "text", text: `Метка изображения: image_${index}` },
     {
       type: "image_url",
       image_url: {
@@ -592,7 +610,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
   const mandatorySuffix = finalConfig.mandatorySuffix || "Все элементы должны быть чёткими.";
 
   const systemPrompt = `Ты — профессиональный арт-директор и эксперт по составлению подробных промптов для генерации изображений.
-Выдай строго валидный JSON-объект, где ключами являются ID картинок, а значениями — объекты с полями "description", "prompt" и "tags".
+Выдай строго валидный JSON-объект, где ключами являются метки картинок ("image_0", "image_1" и т.д.), а значениями — объекты с полями "description", "prompt" и "tags".
 
 ТРЕБОВАНИЯ К ПОЛЮ "prompt":
 1. ДЛИНА И ДЕТАЛИЗАЦИЯ: Промпт должен быть МАКСИМАЛЬНО развернутым, глубоким и подробным (объемом от 150 до 250 слов). 
@@ -625,7 +643,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
         ],
       },
     ],
-    max_tokens: 6000,
+    max_tokens: 8000,
     response_format: { type: "json_object" },
   });
 
