@@ -452,13 +452,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
               spreadsheetId: resultSheetId,
               requestBody: {
                 requests: [
-                  {
-                    updateDimensionProperties: {
-                      range: { sheetId: 0, dimension: "ROWS", startIndex: startRow - 1, endIndex: endRow },
-                      properties: { pixelSize: 250 },
-                      fields: "pixelSize",
-                    },
-                  },
+                  // 1. Задаем фиксированную ширину для превью (200px)
                   {
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
@@ -466,6 +460,23 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                       fields: "pixelSize",
                     },
                   },
+                  // 2. Задаем ширину колонки Описание (300px)
+                  {
+                    updateDimensionProperties: {
+                      range: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 },
+                      properties: { pixelSize: 300 },
+                      fields: "pixelSize",
+                    },
+                  },
+                  // 3. Задаем широкую колонку для Промптов (500px), чтобы текст удобно читался
+                  {
+                    updateDimensionProperties: {
+                      range: { sheetId: 0, dimension: "COLUMNS", startIndex: 3, endIndex: 4 },
+                      properties: { pixelSize: 500 },
+                      fields: "pixelSize",
+                    },
+                  },
+                  // 4. Включаем перенос строк (WRAP) и выравнивание по верхнему краю (TOP)
                   {
                     repeatCell: {
                       range: {
@@ -475,10 +486,17 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                         startColumnIndex: 0,
                         endColumnIndex: 5,
                       },
-                      cell: { userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "MIDDLE" } },
+                      cell: { userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "TOP" } },
                       fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
                     },
                   },
+                  // 5. АВТО-ВЫСОТА СТРОК: динамически увеличивает высоту ячейки под 100% объема текста
+                  {
+                    autoResizeDimensions: {
+                      dimensions: { sheetId: 0, dimension: "ROWS", startIndex: startRow - 1, endIndex: endRow },
+                    },
+                  },
+                  // 6. Подгоняем ширину для ссылок и тегов
                   {
                     autoResizeDimensions: {
                       dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
@@ -486,7 +504,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                   },
                   {
                     autoResizeDimensions: {
-                      dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 5 },
+                      dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 4, endIndex: 5 },
                     },
                   },
                 ],
