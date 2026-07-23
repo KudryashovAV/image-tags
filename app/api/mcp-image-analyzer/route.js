@@ -6,9 +6,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const CONFIG_FILE_ID = "1hbnTrgWZUD5_uHlIeGibTgH8CUZBdPI_";
+// ID таблицы с настройками стилей
+const CONFIG_SHEET_ID = "1ugGqUVGytEvLpcNfBKyAIhss8eB6UkcY3_DnSSdzy7Y";
 
-// Нативная функция отправки сообщений в Slack через Токен (Возвращает объект с деталями)
+// Нативная функция отправки сообщений в Slack через Токен
 async function sendSlackMessage(channel, text, threadTs = null) {
   const token = process.env.SLACK_BOT_TOKEN;
   if (!token) {
@@ -90,16 +91,14 @@ export async function POST(request) {
     const contentType = request.headers.get("content-type") || "";
 
     let folderId = null;
-    let rules = null;
-    let ratio = null;
-    let mandatorySuffix = null;
-
+    let style = null;
     let isMcp = false;
     let isSlack = false;
     let id = 1;
     let slackChannelId = null;
     let responseUrl = null;
 
+    // Парсинг параметров в зависимости от источника запроса
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
@@ -107,26 +106,21 @@ export async function POST(request) {
       slackChannelId = formData.get("channel_id")?.toString();
       responseUrl = formData.get("response_url")?.toString() || null;
 
-      if (!slackText) {
-        return new Response("❌ Ошибка: Вы не указали ID папки. Используйте: /analyze [ID_папки]", { status: 200 });
-      }
-
       const firstSpaceIndex = slackText.indexOf(" ");
       if (firstSpaceIndex === -1) {
-        folderId = slackText;
+        return new Response("❌ Ошибка: Вы не указали стиль. Используйте: /analyze [ID_папки] [Стиль]", {
+          status: 200,
+        });
       } else {
         folderId = slackText.substring(0, firstSpaceIndex).trim();
-        const remainingArgs = slackText.substring(firstSpaceIndex).trim();
+        style = slackText.substring(firstSpaceIndex).trim();
+        // Очищаем префиксы и кавычки (если пользователь ввел "style=cyberpunk" или "'cyberpunk'")
+        if (style.toLowerCase().startsWith("style=")) style = style.substring(6).trim();
+        style = style.replace(/^["']|["']$/g, "");
+      }
 
-        const regex = /(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
-        let match;
-        while ((match = regex.exec(remainingArgs)) !== null) {
-          const key = match[1].toLowerCase();
-          const value = match[2] || match[3] || match[4];
-          if (key === "ratio") ratio = value;
-          if (key === "rules" || key === "правила") rules = value;
-          if (key === "mandatorysuffix" || key === "суффикс" || key === "mandatory") mandatorySuffix = value;
-        }
+      if (!folderId || !style) {
+        return new Response("❌ Ошибка: Отсутствует ID папки или стиль.", { status: 200 });
       }
     } else {
       const body = await request.json();
@@ -141,111 +135,134 @@ export async function POST(request) {
               tools: [
                 {
                   name: "analyze_google_drive_folder",
-                  description: "Фоновый анализ папок.",
-                  inputSchema: { type: "object", properties: { folderId: { type: "string" } }, required: ["folderId"] },
+                  description: "Фоновый анализ папок с применением заданного стиля.",
+                  inputSchema: {
+                    type: "object",
+                    properties: {
+                      folderId: { type: "string" },
+                      style: { type: "string", description: "Название стиля из таблицы настроек." },
+                    },
+                    required: ["folderId", "style"],
+                  },
                 },
               ],
             },
           });
         }
         if (body.method === "tools/call" && body.params?.name === "analyze_google_drive_folder") {
-          const args = body.params.arguments || {};
-          folderId = args.folderId;
-          rules = args.rules;
-          ratio = args.ratio;
-          mandatorySuffix = args.mandatorySuffix || args.mandatory;
+          folderId = body.params.arguments?.folderId;
+          style = body.params.arguments?.style;
         }
       } else {
         folderId = body.folderId;
-        rules = body.rules;
-        ratio = body.ratio;
-        mandatorySuffix = body.mandatorySuffix || body.mandatory;
+        style = body.style;
       }
     }
 
-    if (!folderId) {
-      if (isSlack) return new Response("❌ Ошибка: отсутствует folderId", { status: 200 });
+    if (!folderId || !style) {
+      if (isSlack) return new Response("❌ Ошибка: отсутствует folderId или style", { status: 200 });
       return NextResponse.json(
         isMcp
-          ? { jsonrpc: "2.0", id, error: { code: -32602, message: "Missing folderId" } }
-          : { error: "Missing folderId" },
+          ? { jsonrpc: "2.0", id, error: { code: -32602, message: "Missing folderId or style" } }
+          : { error: "Missing folderId or style" },
         { status: 400 },
       );
     }
 
-    const rawOverrides = { rules, ratio, mandatorySuffix };
-    backgroundOrchestrator(folderId, rawOverrides, { slackChannelId, responseUrl });
-
-    if (isSlack) {
-      return new Response("", { status: 200 });
+    // ШАГ 1: Создаем стартовый тред в Slack
+    let slackThreadTs = null;
+    if (isSlack && slackChannelId) {
+      const initialMessage = `🚀 *Запрос на анализ папки:* \`${folderId}\`\n🎨 *Стиль:* \`${style}\`\n⏳ Проверяю настройки стиля в базе...`;
+      const slackRes = await sendSlackMessage(slackChannelId, initialMessage);
+      if (slackRes.ok) {
+        slackThreadTs = slackRes.ts;
+      } else if (responseUrl) {
+        await sendSlackResponseUrl(
+          responseUrl,
+          `⚠️ Бот не смог создать тред (ошибка: \`${slackRes.error}\`). Попытка продолжить...`,
+          true,
+        );
+      }
     }
 
-    const msg = `Рекурсивный анализ папки ${folderId} запущен в фоне.`;
+    // ШАГ 2: СИНХРОННАЯ Проверка настроек стиля в Google Sheets
+    let finalConfig = null;
+    try {
+      const googleAuth = await getGoogleAuth();
+      const configResponse = await googleAuth.sheets.spreadsheets.values.get({
+        spreadsheetId: CONFIG_SHEET_ID,
+        range: "A:D",
+      });
+      const configData = configResponse.data.values || [];
+
+      // Ищем строку по Колонке A (без учета регистра)
+      const matchedRow = configData.find(
+        (row) => row[0] && row[0].toString().trim().toLowerCase() === style.toLowerCase(),
+      );
+
+      if (!matchedRow) {
+        const errorMsg = `❌ *Ошибка:* Стиль \`${style}\` не найден в таблице настроек. Никаких действий произведено не будет.`;
+        if (isSlack) {
+          if (slackThreadTs) {
+            await sendSlackMessage(slackChannelId, errorMsg, slackThreadTs);
+          } else if (responseUrl) {
+            await sendSlackResponseUrl(responseUrl, errorMsg, true);
+          }
+          return new Response("", { status: 200 });
+        } else {
+          // Ответ для cURL / Postman / MCP - возвращаем 400 статус
+          return NextResponse.json({ error: errorMsg }, { status: 400 });
+        }
+      }
+
+      finalConfig = {
+        style: matchedRow[0],
+        mandatorySuffix: matchedRow[1] || "",
+        ratio: matchedRow[2] || "",
+        rules: matchedRow[3] || "",
+      };
+
+      if (isSlack && slackThreadTs) {
+        await sendSlackMessage(
+          slackChannelId,
+          `✅ Стиль \`${finalConfig.style}\` успешно загружен. Начинаю рекурсивный обход директорий...`,
+          slackThreadTs,
+        );
+      }
+    } catch (error) {
+      console.error("Config fetch error:", error);
+      const errorMsg = `❌ Ошибка доступа к Google Sheets при проверке стиля: ${error.message}`;
+      if (isSlack) {
+        if (slackThreadTs) await sendSlackMessage(slackChannelId, errorMsg, slackThreadTs);
+        else if (responseUrl) await sendSlackResponseUrl(responseUrl, errorMsg, true);
+        return new Response("", { status: 200 });
+      }
+      return NextResponse.json({ error: errorMsg }, { status: 500 });
+    }
+
+    // ШАГ 3: Запускаем фоновый оркестратор только если стиль найден
+    backgroundOrchestrator(folderId, finalConfig, { slackChannelId, slackThreadTs, responseUrl });
+
+    if (isSlack) {
+      return new Response("", { status: 200 }); // Slack получает 200, чтобы не было таймаута
+    }
+
+    const msg = `Стиль '${finalConfig.style}' успешно загружен. Рекурсивный анализ папки ${folderId} запущен в фоне.`;
     return isMcp
       ? NextResponse.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: msg }] } })
-      : NextResponse.json({ success: true, summary: msg });
+      : NextResponse.json({ success: true, summary: msg, config: finalConfig });
   } catch (error) {
     console.error("Fatal Endpoint Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
 
-async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = {}) {
-  const { slackChannelId, responseUrl } = slackParams;
-  let slackThreadTs = null;
+async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {}) {
+  const { slackChannelId, slackThreadTs, responseUrl } = slackParams;
 
-  console.log(`[Background Analyzer] Вход в фоновый режим. Папка: ${rootFolderId}`);
+  console.log(`[Background Analyzer] Вход в фоновый режим. Папка: ${rootFolderId}, Стиль: ${finalConfig.style}`);
 
   try {
-    // ШАГ 1: Публикуем стартовое сообщение в канал
-    if (slackChannelId) {
-      const initialMessage = `🚀 *Запуск анализа папки:* \`${rootFolderId}\`\n⏳ Начинаю подключение к сервисам Google и обход директорий. Ссылки на готовые таблицы будут приходить ответами в этот тред!`;
-      const slackRes = await sendSlackMessage(slackChannelId, initialMessage);
-
-      if (slackRes.ok) {
-        slackThreadTs = slackRes.ts;
-        console.log(`[Slack OK] Стартовый тред успешно создан публично. TS: ${slackThreadTs}`);
-      } else {
-        console.error(`[Slack Error] Не удалось создать тред через chat.postMessage. Код ошибки: ${slackRes.error}`);
-        // Резервный канал оповещения, если токен не сработал
-        if (responseUrl) {
-          const warningBackupMsg =
-            `⚠️ *Внимание:* Бот не смог опубликовать сообщение через стандартный API (ошибка: \`${slackRes.error}\`).\n` +
-            `Но анализ папки \`${rootFolderId}\` *успешно выполняется на сервере в фоне*!\n` +
-            `_Проверьте переменную \`SLACK_BOT_TOKEN\` в вашем \`.env\` и наличие Scopes \`chat:write\` в панели Slack._`;
-          await sendSlackResponseUrl(responseUrl, warningBackupMsg, true);
-        }
-      }
-    }
-
-    let googleAuth;
-    try {
-      googleAuth = await getGoogleAuth();
-    } catch (authErr) {
-      console.error("[Google Auth Error]", authErr.message);
-      const errMsg = `❌ *Критическая ошибка авторизации Google:* \`${authErr.message}\`. Процесс остановлен.`;
-      if (slackChannelId && slackThreadTs) await sendSlackMessage(slackChannelId, errMsg, slackThreadTs);
-      else if (responseUrl) await sendSlackResponseUrl(responseUrl, errMsg, true);
-      return;
-    }
-
-    const { drive: baseDrive, sheets: baseSheets } = googleAuth;
-    let promptConfig = {};
-
-    try {
-      const configResponse = await baseDrive.files.get({ fileId: CONFIG_FILE_ID, alt: "media" });
-      promptConfig = typeof configResponse.data === "string" ? JSON.parse(configResponse.data) : configResponse.data;
-    } catch (err) {
-      console.error("[Config Error]", err.message);
-    }
-
-    const finalConfig = {
-      rules: rawOverrides.rules || promptConfig["rules"] || promptConfig["правила"],
-      ratio: rawOverrides.ratio || promptConfig["ratio"],
-      mandatorySuffix:
-        rawOverrides.mandatorySuffix || promptConfig["mandatory"] || promptConfig["обязательная часть промта"],
-    };
-
     const accountSheetId = process.env.GOOGLE_MASTER_SHEET_ID;
     if (!accountSheetId) {
       const sheetErrMsg =
@@ -490,12 +507,10 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
           requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
         });
 
-        // --- УМНЫЙ ОПЕРАТИВНЫЙ ОТЧЕТ С ФОЛБЕКОМ ИЗ ТРЕДА В КАНАЛ ---
         const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
 
         if (slackChannelId && slackThreadTs) {
           const replyRes = await sendSlackMessage(slackChannelId, folderReadyMsg, slackThreadTs);
-          // Если Slack отверг ответ в тред, пишем резервным методом напрямую в канал
           if (!replyRes.ok && responseUrl) {
             await sendSlackResponseUrl(
               responseUrl,
@@ -517,9 +532,8 @@ async function backgroundOrchestrator(rootFolderId, rawOverrides, slackParams = 
 
     await processFolder(rootFolderId);
 
-    // --- УМНЫЙ ФИНАЛЬНЫЙ ОТЧЕТ С ФОЛБЕКОМ ИЗ ТРЕДА В КАНАЛ ---
     const finalSlackSummary =
-      `🏁 *Весь рекурсивный анализ полностью завершен!*\n\n` +
+      `🏁 *Весь рекурсивный анализ со стилем '${finalConfig.style}' завершен!*\n\n` +
       `📈 *Итоги сессии:*\n` +
       `• Всего новых папок: *${foldersAnalyzedCount}*\n` +
       `• Всего размечено изображений: *${totalProcessedImages}*\n\n` +
@@ -554,8 +568,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
 
   const rules = finalConfig.rules || "Создавай максимально подробный и точный промпт.";
   const ratio = finalConfig.ratio || "2:3";
-  const mandatorySuffix =
-    finalConfig.mandatorySuffix || finalConfig.mandatory || "Все элементы должны быть чёткими. Формат 2:3";
+  const mandatorySuffix = finalConfig.mandatorySuffix || "Все элементы должны быть чёткими. Формат 2:3";
 
   const systemPrompt = `Ты — эксперт. Выдай строго валидный JSON-объект, где ключами являются ID картинок, а значениями — объекты с полями "description", "prompt" и "tags".
 Правила: ${rules}
