@@ -110,6 +110,7 @@ export async function POST(request) {
     let singlePrompt = null;
     let selectedModel = null;
     let channelId = null;
+    let userId = null;
     let isSlack = false;
 
     if (contentType.includes("application/x-www-form-urlencoded")) {
@@ -117,6 +118,7 @@ export async function POST(request) {
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
       channelId = formData.get("channel_id")?.toString() || null;
+      userId = formData.get("user_id")?.toString() || null; // 👈 Извлекаем ID автора из Slack
 
       if (!slackText) {
         return NextResponse.json({
@@ -156,7 +158,7 @@ export async function POST(request) {
     }
 
     if (singlePrompt) {
-      backgroundSingleProcessor(singlePrompt, selectedModel, channelId);
+      backgroundSingleProcessor(singlePrompt, selectedModel, channelId, userId);
 
       if (isSlack) {
         const displayLabel = selectedModel === "all" ? "ВСЕ МОДЕЛИ" : selectedModel.toUpperCase().replace(/,/g, " + ");
@@ -167,7 +169,7 @@ export async function POST(request) {
       }
       return NextResponse.json({ success: true, message: `Фоновый процесс одиночной генерации запущен.` });
     } else if (spreadsheetId) {
-      backgroundProcessor(spreadsheetId, channelId, selectedModel);
+      backgroundProcessor(spreadsheetId, channelId, selectedModel, userId);
 
       if (isSlack) {
         return NextResponse.json({
@@ -197,7 +199,7 @@ async function moveFileToFolder(drive, fileId, folderId) {
 // ========================================================
 // ВОРКЕР 1: КОНВЕЙЕР ОДИНОЧНЫХ ГЕНЕРАЦИЙ
 // ========================================================
-async function backgroundSingleProcessor(prompt, model, channelId) {
+async function backgroundSingleProcessor(prompt, model, channelId, userId = null) {
   console.log(`[Single Worker] Старт одиночной генерации для конфигурации: ${model}`);
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
@@ -260,6 +262,8 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
       rootThreadTs,
     );
 
+    const userMention = userId ? `<@${userId}> ` : "";
+
     for (const currentModel of modelsToRun) {
       let imageBase64 = null;
       let durationStr = "Ошибка";
@@ -302,7 +306,6 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
 
       if (imageBase64) {
         const now = new Date();
-        const pad = (n) => String(n).padStart(2, "0");
         const fileTimeStr = `${now.getDate()}.${now.getMonth() + 1}_${now.getHours()}-${now.getMinutes()}`;
         const filename = `${currentModel.toUpperCase()}_${fileTimeStr}.png`;
 
@@ -313,7 +316,7 @@ async function backgroundSingleProcessor(prompt, model, channelId) {
         await sendSlackMessage(
           slackToken,
           channelId,
-          `✅ *Генерация через ${modelNameTag} завершена!*\n👉 *Ссылка:* ${fileUrl}`,
+          `✅ ${userMention}*Генерация через ${modelNameTag} завершена!*\n👉 *Ссылка:* ${fileUrl}`,
           rootThreadTs,
         );
       }
@@ -374,7 +377,7 @@ async function appendAndFormatSingleRow(sheets, spreadsheetId, rowValues) {
 // ========================================================
 // ВОРКЕР 2: КЛАССИЧЕСКИЙ ПАКЕТНЫЙ КОНВЕЙЕР ПО ТАБЛИЦАМ
 // ========================================================
-async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
+async function backgroundProcessor(spreadsheetId, channelId, model = "all", userId = null) {
   console.log(`[Background Worker] Старт изоляции для таблицы: ${spreadsheetId}`);
   const slackToken = process.env.SLACK_BOT_TOKEN;
   let rootThreadTs = null;
@@ -429,7 +432,7 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
       if (prompt && prompt.trim()) {
         const trimmedPrompt = prompt.trim();
 
-        // 🛑 Пропускаем промпты с текстом "Ошибка ИИ"
+        // Игнорируем строки со значением "Ошибка ИИ"
         if (trimmedPrompt.toLowerCase() === "ошибка ии") {
           continue;
         }
@@ -697,8 +700,10 @@ async function backgroundProcessor(spreadsheetId, channelId, model = "all") {
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
+    const userMention = userId ? `<@${userId}> ` : "";
+
     const finalSummaryText =
-      `🏁 *Массовая тройная генерация завершена!*\n` +
+      `🏁 ${userMention}*Массовая генерация завершена!*\n` +
       `• Всего промптов обработано: *${stateData.totalCount}*\n` +
       `• Успешно закрыто строк с полным пакетом изображений: *${stateData.completedCount}/${stateData.totalCount}*\n\n` +
       `👉 *Ссылка на корневой архив Диска:* ${dateFolderUrl}\n` +
