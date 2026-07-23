@@ -385,7 +385,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
         }
 
         const imagesToProcess = images.filter((img) => !analyzedImageIds.has(img.webViewLink));
-        const batchSize = 10;
+        const batchSize = 5;
 
         for (let i = 0; i < imagesToProcess.length; i += batchSize) {
           const chunk = imagesToProcess.slice(i, i + batchSize);
@@ -563,25 +563,54 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
 async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
   const imageContentBlocks = imagesChunk.flatMap((img) => [
     { type: "text", text: `IMAGE_ID_START:${img.id}` },
-    { type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.base64}`, detail: "low" } },
+    {
+      type: "image_url",
+      image_url: {
+        url: `data:${img.mimeType};base64,${img.base64}`,
+        detail: "high", // 👈 Включаем 'high': дает ИИ полное зрение мелких деталей почти бесплатно
+      },
+    },
   ]);
 
   const rules = finalConfig.rules || "Создавай максимально подробный и точный промпт.";
   const ratio = finalConfig.ratio || "2:3";
-  const mandatorySuffix = finalConfig.mandatorySuffix || "Все элементы должны быть чёткими. Формат 2:3";
+  const mandatorySuffix = finalConfig.mandatorySuffix || "Все элементы должны быть чёткими.";
 
-  const systemPrompt = `Ты — эксперт. Выдай строго валидный JSON-объект, где ключами являются ID картинок, а значениями — объекты с полями "description", "prompt" и "tags".
-Правила: ${rules}
-В КОНЦЕ поля "prompt" ОБЯЗАТЕЛЬНО добавляй: "${mandatorySuffix} Формат ${ratio}"
+  const systemPrompt = `Ты — профессиональный арт-директор и эксперт по составлению подробных промптов для генерации изображений.
+Выдай строго валидный JSON-объект, где ключами являются ID картинок, а значениями — объекты с полями "description", "prompt" и "tags".
+
+ТРЕБОВАНИЯ К ПОЛЮ "prompt":
+1. ДЛИНА И ДЕТАЛИЗАЦИЯ: Промпт должен быть МАКСИМАЛЬНО развернутым, глубоким и подробным (объемом от 150 до 250 слов). 
+2. Составляй описание последовательно:
+   - Общая концепция, объект и сюжетная идея.
+   - Ракурс камеры, угол съемки, дистанция и кадрирование.
+   - Детальная цветовая палитра (с указанием точных оттенков) и распределение цветовых масс.
+   - Освещение (источники, характер света, тени, блики, время суток).
+   - Фактуры, материалы, мелкие детали (капли, текстуры, поверхности).
+   - Настройка заднего плана, глубина резкости, фокус и резкость.
+3. ПРАВИЛА ТРАНСФОРМАЦИИ:
+   ${rules}
+4. ОКОНЧАНИЕ ПРОМПТА:
+   В самом КОНЦЕ поля "prompt" ОБЯЗАТЕЛЬНО без изменений добавляй: "${mandatorySuffix} Формат ${ratio}"
+
+ТРЕБОВАНИЯ К ПОЛЮ "tags":
+- Все теги и ключевые слова ДОЛЖНЫ БЫТЬ СТРОГО НА АНГЛИЙСКОМ ЯЗЫКЕ (English only), независимо от языка остальных полей, и разделены запятыми (например: "flowers, macro shot, water drops, vibrant colors, soft lighting").
+
 Формат ответа строго JSON:\n{\n  "ID": { "description": "...", "prompt": "...", "tags": "..." }\n}`;
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini", // 👈 Оставляем ультра-дешевую модель
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: [{ type: "text", text: "Проанализируй:" }, ...imageContentBlocks] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Проанализируй изображения и составь максимально подробные художественные промпты:" },
+          ...imageContentBlocks,
+        ],
+      },
     ],
-    max_tokens: 4000,
+    max_tokens: 6000, // 👈 Увеличиваем запас токенов на ответ для всей пачки
     response_format: { type: "json_object" },
   });
 
