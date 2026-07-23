@@ -96,6 +96,7 @@ export async function POST(request) {
     let isSlack = false;
     let id = 1;
     let slackChannelId = null;
+    let slackUserId = null; // ID пользователя в Slack
     let responseUrl = null;
 
     // Парсинг параметров в зависимости от источника запроса
@@ -104,6 +105,7 @@ export async function POST(request) {
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
       slackChannelId = formData.get("channel_id")?.toString();
+      slackUserId = formData.get("user_id")?.toString() || null; // 👈 Извлекаем ID пользователя Slack
       responseUrl = formData.get("response_url")?.toString() || null;
 
       const firstSpaceIndex = slackText.indexOf(" ");
@@ -114,7 +116,6 @@ export async function POST(request) {
       } else {
         folderId = slackText.substring(0, firstSpaceIndex).trim();
         style = slackText.substring(firstSpaceIndex).trim();
-        // Очищаем префиксы и кавычки (если пользователь ввел "style=cyberpunk" или "'cyberpunk'")
         if (style.toLowerCase().startsWith("style=")) style = style.substring(6).trim();
         style = style.replace(/^["']|["']$/g, "");
       }
@@ -169,10 +170,12 @@ export async function POST(request) {
       );
     }
 
-    // ШАГ 1: Создаем стартовый тред в Slack
+    // ШАГ 1: Создаем стартовый тред в Slack с упоминанием пользователя
     let slackThreadTs = null;
+    const userMention = slackUserId ? `<@${slackUserId}>` : "Пользователь";
+
     if (isSlack && slackChannelId) {
-      const initialMessage = `🚀 *Запрос на анализ папки:* \`${folderId}\`\n🎨 *Стиль:* \`${style}\`\n⏳ Проверяю настройки стиля в базе...`;
+      const initialMessage = `🚀 *Запрос на анализ папки:* \`${folderId}\` от ${userMention}\n🎨 *Стиль:* \`${style}\`\n⏳ Проверяю настройки стиля в базе...`;
       const slackRes = await sendSlackMessage(slackChannelId, initialMessage);
       if (slackRes.ok) {
         slackThreadTs = slackRes.ts;
@@ -195,13 +198,12 @@ export async function POST(request) {
       });
       const configData = configResponse.data.values || [];
 
-      // Ищем строку по Колонке A (без учета регистра)
       const matchedRow = configData.find(
         (row) => row[0] && row[0].toString().trim().toLowerCase() === style.toLowerCase(),
       );
 
       if (!matchedRow) {
-        const errorMsg = `❌ *Ошибка:* Стиль \`${style}\` не найден в таблице настроек. Никаких действий произведено не будет.`;
+        const errorMsg = `❌ ${userMention}, стиль \`${style}\` не найден в таблице настроек. Никаких действий произведено не будет.`;
         if (isSlack) {
           if (slackThreadTs) {
             await sendSlackMessage(slackChannelId, errorMsg, slackThreadTs);
@@ -210,7 +212,6 @@ export async function POST(request) {
           }
           return new Response("", { status: 200 });
         } else {
-          // Ответ для cURL / Postman / MCP - возвращаем 400 статус
           return NextResponse.json({ error: errorMsg }, { status: 400 });
         }
       }
@@ -240,11 +241,11 @@ export async function POST(request) {
       return NextResponse.json({ error: errorMsg }, { status: 500 });
     }
 
-    // ШАГ 3: Запускаем фоновый оркестратор только если стиль найден
-    backgroundOrchestrator(folderId, finalConfig, { slackChannelId, slackThreadTs, responseUrl });
+    // ШАГ 3: Запускаем фоновый оркестратор
+    backgroundOrchestrator(folderId, finalConfig, { slackChannelId, slackThreadTs, responseUrl, slackUserId });
 
     if (isSlack) {
-      return new Response("", { status: 200 }); // Slack получает 200, чтобы не было таймаута
+      return new Response("", { status: 200 });
     }
 
     const msg = `Стиль '${finalConfig.style}' успешно загружен. Рекурсивный анализ папки ${folderId} запущен в фоне.`;
@@ -258,7 +259,8 @@ export async function POST(request) {
 }
 
 async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {}) {
-  const { slackChannelId, slackThreadTs, responseUrl } = slackParams;
+  const { slackChannelId, slackThreadTs, responseUrl, slackUserId } = slackParams;
+  const userMention = slackUserId ? `<@${slackUserId}>` : "";
 
   console.log(`[Background Analyzer] Вход в фоновый режим. Папка: ${rootFolderId}, Стиль: ${finalConfig.style}`);
 
@@ -452,7 +454,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
               spreadsheetId: resultSheetId,
               requestBody: {
                 requests: [
-                  // 1. Задаем фиксированную ширину для превью (200px)
                   {
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "COLUMNS", startIndex: 1, endIndex: 2 },
@@ -460,7 +461,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                       fields: "pixelSize",
                     },
                   },
-                  // 2. Задаем ширину колонки Описание (300px)
                   {
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 },
@@ -468,7 +468,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                       fields: "pixelSize",
                     },
                   },
-                  // 3. Задаем широкую колонку для Промптов (500px), чтобы текст удобно читался
                   {
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "COLUMNS", startIndex: 3, endIndex: 4 },
@@ -476,7 +475,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                       fields: "pixelSize",
                     },
                   },
-                  // 4. Включаем перенос строк (WRAP) и выравнивание по верхнему краю (TOP)
                   {
                     repeatCell: {
                       range: {
@@ -490,13 +488,11 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                       fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
                     },
                   },
-                  // 5. АВТО-ВЫСОТА СТРОК: динамически увеличивает высоту ячейки под 100% объема текста
                   {
                     autoResizeDimensions: {
                       dimensions: { sheetId: 0, dimension: "ROWS", startIndex: startRow - 1, endIndex: endRow },
                     },
                   },
-                  // 6. Подгоняем ширину для ссылок и тегов
                   {
                     autoResizeDimensions: {
                       dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
@@ -550,8 +546,9 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
 
     await processFolder(rootFolderId);
 
+    // Финальное сообщение с упоминанием пользователя
     const finalSlackSummary =
-      `🏁 *Весь рекурсивный анализ со стилем '${finalConfig.style}' завершен!*\n\n` +
+      `${userMention ? `${userMention} ` : ""}🏁 *Весь рекурсивный анализ со стилем '${finalConfig.style}' завершен!*\n\n` +
       `📈 *Итоги сессии:*\n` +
       `• Всего новых папок: *${foldersAnalyzedCount}*\n` +
       `• Всего размечено изображений: *${totalProcessedImages}*\n\n` +
@@ -572,7 +569,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
     }
   } catch (fatalBgError) {
     console.error("[Fatal Background Worker Error]:", fatalBgError.message);
-    const failMsg = `❌ *Критическая ошибка фонового процесса:* \`${fatalBgError.message}\``;
+    const failMsg = `❌ ${userMention} *Критическая ошибка фонового процесса:* \`${fatalBgError.message}\``;
     if (slackChannelId && slackThreadTs) await sendSlackMessage(slackChannelId, failMsg, slackThreadTs);
     else if (responseUrl) await sendSlackResponseUrl(responseUrl, failMsg, true);
   }
@@ -585,7 +582,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
       type: "image_url",
       image_url: {
         url: `data:${img.mimeType};base64,${img.base64}`,
-        detail: "high", // 👈 Включаем 'high': дает ИИ полное зрение мелких деталей почти бесплатно
+        detail: "high",
       },
     },
   ]);
@@ -617,7 +614,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
 Формат ответа строго JSON:\n{\n  "ID": { "description": "...", "prompt": "...", "tags": "..." }\n}`;
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini", // 👈 Оставляем ультра-дешевую модель
+    model: "gpt-4o-mini",
     messages: [
       { role: "system", content: systemPrompt },
       {
@@ -628,7 +625,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
         ],
       },
     ],
-    max_tokens: 6000, // 👈 Увеличиваем запас токенов на ответ для всей пачки
+    max_tokens: 6000,
     response_format: { type: "json_object" },
   });
 
