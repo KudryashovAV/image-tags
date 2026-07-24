@@ -96,16 +96,15 @@ export async function POST(request) {
     let isSlack = false;
     let id = 1;
     let slackChannelId = null;
-    let slackUserId = null; // ID пользователя в Slack
+    let slackUserId = null;
     let responseUrl = null;
 
-    // Парсинг параметров в зависимости от источника запроса
     if (contentType.includes("application/x-www-form-urlencoded")) {
       isSlack = true;
       const formData = await request.formData();
       const slackText = (formData.get("text") || "").trim();
       slackChannelId = formData.get("channel_id")?.toString();
-      slackUserId = formData.get("user_id")?.toString() || null; // 👈 Извлекаем ID пользователя Slack
+      slackUserId = formData.get("user_id")?.toString() || null;
       responseUrl = formData.get("response_url")?.toString() || null;
 
       const firstSpaceIndex = slackText.indexOf(" ");
@@ -170,7 +169,6 @@ export async function POST(request) {
       );
     }
 
-    // ШАГ 1: Создаем стартовый тред в Slack с упоминанием пользователя
     let slackThreadTs = null;
     const userMention = slackUserId ? `<@${slackUserId}>` : "Пользователь";
 
@@ -188,7 +186,6 @@ export async function POST(request) {
       }
     }
 
-    // ШАГ 2: СИНХРОННАЯ Проверка настроек стиля в Google Sheets
     let finalConfig = null;
     try {
       const googleAuth = await getGoogleAuth();
@@ -241,7 +238,6 @@ export async function POST(request) {
       return NextResponse.json({ error: errorMsg }, { status: 500 });
     }
 
-    // ШАГ 3: Запускаем фоновый оркестратор
     backgroundOrchestrator(folderId, finalConfig, { slackChannelId, slackThreadTs, responseUrl, slackUserId });
 
     if (isSlack) {
@@ -378,11 +374,13 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
           });
 
           await drive.permissions.create({ fileId: resultSheetId, requestBody: { role: "writer", type: "anyone" } });
+
+          // Изменена шапка: убрали "Описание"
           await sheets.spreadsheets.values.append({
             spreadsheetId: resultSheetId,
             range: "Результаты!A1",
             valueInputOption: "USER_ENTERED",
-            requestBody: { values: [["Ссылка", "Превью", "Описание", "Промт для воссоздания", "Тэги"]] },
+            requestBody: { values: [["Ссылка", "Превью", "Промт для воссоздания", "Тэги"]] },
           });
         }
 
@@ -414,7 +412,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
           const validImages = preparedImages.filter((img) => img !== null);
           if (validImages.length === 0) continue;
 
-          // 2. Улучшенный повторный запрос (3 попытки с нарастающей паузой)
           let gptResults = {};
           let success = false;
 
@@ -426,7 +423,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
             } catch (openaiErr) {
               console.error(`[OpenAI Attempt ${attempt}/3 Failed]:`, openaiErr.message);
               if (attempt < 3) {
-                await new Promise((r) => setTimeout(r, attempt * 4000)); // Пауза 4s, затем 8s
+                await new Promise((r) => setTimeout(r, attempt * 4000));
               }
             }
           }
@@ -435,12 +432,11 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
             console.error("[OpenAI Error]: Все 3 попытки анализа завершились ошибкой.");
           }
 
-          // 3. Безопасное сопоставление по индексу (image_0, image_1) или по ID
+          // Изменена структура строки (исключили gptData.description)
           const rowsToAppend = validImages.map((img, index) => {
             const keyByIndex = `image_${index}`;
             const gptData = gptResults[keyByIndex] ||
               gptResults[img.id] || {
-                description: "Ошибка ИИ (Превышен таймаут/лимит)",
                 prompt: "Ошибка ИИ (Превышен таймаут/лимит)",
                 tags: "error",
               };
@@ -448,15 +444,15 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
             return [
               img.link,
               `=IMAGE("https://drive.google.com/thumbnail?id=${img.id}&sz=w500")`,
-              gptData.description,
               gptData.prompt,
               gptData.tags,
             ];
           });
 
+          // Обновлен диапазон запись в колонки A:D
           const appendRes = await sheets.spreadsheets.values.append({
             spreadsheetId: resultSheetId,
-            range: "Результаты!A:E",
+            range: "Результаты!A:D",
             valueInputOption: "USER_ENTERED",
             requestBody: { values: rowsToAppend },
           });
@@ -467,6 +463,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
             const startRow = parseInt(rangeParts[0].replace(/\D/g, ""));
             const endRow = parseInt(rangeParts[1].replace(/\D/g, ""));
 
+            // Пересчитаны индексы форматирования колонок (0: Ссылка, 1: Превью, 2: Промт, 3: Тэги)
             await sheets.spreadsheets.batchUpdate({
               spreadsheetId: resultSheetId,
               requestBody: {
@@ -481,14 +478,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                   {
                     updateDimensionProperties: {
                       range: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 },
-                      properties: { pixelSize: 300 },
-                      fields: "pixelSize",
-                    },
-                  },
-                  {
-                    updateDimensionProperties: {
-                      range: { sheetId: 0, dimension: "COLUMNS", startIndex: 3, endIndex: 4 },
-                      properties: { pixelSize: 500 },
+                      properties: { pixelSize: 500 }, // Ширина колонки промпта
                       fields: "pixelSize",
                     },
                   },
@@ -499,7 +489,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                         startRowIndex: startRow - 1,
                         endRowIndex: endRow,
                         startColumnIndex: 0,
-                        endColumnIndex: 5,
+                        endColumnIndex: 4, // Ограничение на 4 колонки
                       },
                       cell: { userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "TOP" } },
                       fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
@@ -517,7 +507,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
                   },
                   {
                     autoResizeDimensions: {
-                      dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 4, endIndex: 5 },
+                      dimensions: { sheetId: 0, dimension: "COLUMNS", startIndex: 3, endIndex: 4 }, // Авторазмер для Тэгов
                     },
                   },
                 ],
@@ -563,7 +553,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
 
     await processFolder(rootFolderId);
 
-    // Финальное сообщение с упоминанием пользователя
     const finalSlackSummary =
       `${userMention ? `${userMention} ` : ""}🏁 *Весь рекурсивный анализ со стилем '${finalConfig.style}' завершен!*\n\n` +
       `📈 *Итоги сессии:*\n` +
@@ -577,7 +566,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
       if (!finalRes.ok && responseUrl) {
         await sendSlackResponseUrl(
           responseUrl,
-          finalSlackSummary + `\n_(⚠️ Не удалось сложить в тред из-за ошибки Slack: \`${finalRes.error}\`)_`,
+          finalSlackSummary + `\n_(⚠️ Не удалось сложить в тред из-за ошибки Slack: \`${replyRes.error}\`)_`,
           true,
         );
       }
@@ -593,7 +582,6 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
 }
 
 async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
-  // Передаем ИИ простые и четкие метки: image_0, image_1
   const imageContentBlocks = imagesChunk.flatMap((img, index) => [
     { type: "text", text: `Метка изображения: image_${index}` },
     {
@@ -609,8 +597,9 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
   const ratio = finalConfig.ratio || "2:3";
   const mandatorySuffix = finalConfig.mandatorySuffix || "Все элементы должны быть чёткими.";
 
+  // Исключено требование к полю "description"
   const systemPrompt = `Ты — профессиональный арт-директор и эксперт по составлению подробных промптов для генерации изображений.
-Выдай строго валидный JSON-объект, где ключами являются метки картинок ("image_0", "image_1" и т.д.), а значениями — объекты с полями "description", "prompt" и "tags".
+Выдай строго валидный JSON-объект, где ключами являются метки картинок ("image_0", "image_1" и т.д.), а значениями — объекты с полями "prompt" и "tags".
 
 ТРЕБОВАНИЯ К ПОЛЮ "prompt":
 1. ДЛИНА И ДЕТАЛИЗАЦИЯ: Промпт должен быть МАКСИМАЛЬНО развернутым, глубоким и подробным (объемом от 200 до 300 слов). 
@@ -629,7 +618,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
 ТРЕБОВАНИЯ К ПОЛЮ "tags":
 - Все теги и ключевые слова ДОЛЖНЫ БЫТЬ СТРОГО НА АНГЛИЙСКОМ ЯЗЫКЕ (English only), независимо от языка остальных полей, и разделены запятыми (например: "flowers, macro shot, water drops, vibrant colors, soft lighting").
 
-Формат ответа строго JSON:\n{\n  "ID": { "description": "...", "prompt": "...", "tags": "..." }\n}`;
+Формат ответа строго JSON:\n{\n  "ID": { "prompt": "...", "tags": "..." }\n}`;
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
