@@ -538,7 +538,7 @@ async function backgroundOrchestrator(rootFolderId, finalConfig, slackParams = {
           requestBody: { values: [[folderUrl, resultSheetUrl, endTime]] },
         });
 
-        const folderReadyMsg = `✅ *Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
+        const folderReadyMsg = `✅ *Система: gpt-4o-mini Папка обработана:* \`${folderName}\` (Изображений: ${images.length})\n📊 Таблица результатов: ${resultSheetUrl}`;
 
         if (slackChannelId && slackThreadTs) {
           const replyRes = await sendSlackMessage(slackChannelId, folderReadyMsg, slackThreadTs);
