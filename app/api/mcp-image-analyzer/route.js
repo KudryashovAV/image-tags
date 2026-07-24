@@ -632,7 +632,7 @@ async function analyzeImagesWithGPT(imagesChunk, finalConfig) {
 Формат ответа строго JSON:\n{\n  "ID": { "description": "...", "prompt": "...", "tags": "..." }\n}`;
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: "gpt-4o-mini",
     messages: [
       { role: "system", content: systemPrompt },
       {
