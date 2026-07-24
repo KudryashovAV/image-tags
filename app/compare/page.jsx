@@ -81,17 +81,16 @@ export default function ComparePage() {
   const [error, setError] = useState(null);
 
   const gptSheetId = searchParams.get("gpt");
-  const geminiUltraSheetId = searchParams.get("ultra");
   const gemini3SheetId = searchParams.get("pro");
 
   useEffect(() => {
-    if (!gptSheetId || !geminiUltraSheetId || !gemini3SheetId) {
-      setError("Параметры URL неполные! Шаблон: ?gpt=ID&ultra=ID&pro=ID");
+    if (!gptSheetId || !gemini3SheetId) {
+      setError("Параметры URL неполные! Шаблон: ?gpt=ID&pro=ID");
       setLoading(false);
       return;
     }
 
-    fetch(`/api/compare-images?gpt=${gptSheetId}&ultra=${geminiUltraSheetId}&pro=${gemini3SheetId}`)
+    fetch(`/api/compare-images?gpt=${gptSheetId}&pro=${gemini3SheetId}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Ошибка сервера: ${res.statusText}`);
         return res.json();
@@ -105,7 +104,7 @@ export default function ComparePage() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [gptSheetId, geminiUltraSheetId, gemini3SheetId]);
+  }, [gptSheetId, gemini3SheetId]);
 
   if (loading)
     return <div className="p-8 text-center font-medium text-lg">⏳ Загрузка и синхронизация ИИ-генераций...</div>;
@@ -125,7 +124,7 @@ export default function ComparePage() {
       </div>
 
       <div className="space-y-12">
-        {matrix.map(([gptUrl, ultraUrl, proUrl, prompt], index) => (
+        {matrix.map(([gptUrl, proUrl, prompt], index) => (
           <div
             key={index}
             className="border border-gray-200 rounded-2xl p-6 bg-gray-50 shadow-sm hover:shadow-md transition-all duration-200"
@@ -160,30 +159,10 @@ export default function ComparePage() {
                 )}
               </div>
 
-              {/* 2. Блок Imagen 4 Ultra */}
-              <div className="bg-white p-3 rounded-xl border border-gray-100 text-center flex flex-col">
-                <span className="text-xs font-black text-blue-600 tracking-widest block mb-2 uppercase">
-                  2. Imagen 4 Ultra
-                </span>
-                <div className="overflow-hidden rounded-lg bg-gray-50 h-[450px] relative border border-gray-100 flex-grow">
-                  <CompareImage src={ultraUrl} alt="Imagen 4 Ultra" />
-                </div>
-                {ultraUrl && ultraUrl !== "Ошибка" && (
-                  <a
-                    href={ultraUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[11px] font-medium text-blue-500 hover:text-blue-700 transition mt-2.5 inline-block"
-                  >
-                    Открыть оригинал ↗
-                  </a>
-                )}
-              </div>
-
               {/* 3. Блок Gemini 3 Pro Image */}
               <div className="bg-white p-3 rounded-xl border border-gray-100 text-center flex flex-col">
                 <span className="text-xs font-black text-purple-600 tracking-widest block mb-2 uppercase">
-                  3. Gemini 3 Pro Image
+                  2. Gemini 3 Pro Image
                 </span>
                 <div className="overflow-hidden rounded-lg bg-gray-50 h-[450px] relative border border-gray-100 flex-grow">
                   <CompareImage src={proUrl} alt="Gemini 3 Pro Image" />

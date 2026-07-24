@@ -26,13 +26,12 @@ export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const gptSheetId = searchParams.get("gpt");
-    const geminiUltraSheetId = searchParams.get("ultra");
     const gemini3SheetId = searchParams.get("pro");
 
     // 1. Проверка на физическое присутствие параметров
-    if (!gptSheetId || !geminiUltraSheetId || !gemini3SheetId) {
+    if (!gptSheetId || !gemini3SheetId) {
       return NextResponse.json(
-        { error: "Пропущены обязательные параметры сессии. URL должен быть вида: ?gpt=ID&ultra=ID&pro=ID" },
+        { error: "Пропущены обязательные параметры сессии. URL должен быть вида: ?gpt=ID&pro=ID" },
         { status: 400 },
       );
     }
@@ -47,10 +46,9 @@ export async function GET(request) {
     };
 
     const gptError = checkId(gptSheetId, "1. GPT-Image-2");
-    const ultraError = checkId(geminiUltraSheetId, "2. Imagen 4 Ultra");
     const proError = checkId(gemini3SheetId, "3. Gemini 3 Pro Image");
 
-    const validationError = gptError || ultraError || proError;
+    const validationError = gptError || proError;
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
@@ -58,14 +56,12 @@ export async function GET(request) {
     const { sheets } = await getGoogleAuth();
 
     // Читаем все три таблицы параллельно
-    const [gptRes, geminiUltraRes, gemini3Res] = await Promise.all([
+    const [gptRes, gemini3Res] = await Promise.all([
       sheets.spreadsheets.values.get({ spreadsheetId: gptSheetId, range: "Лог!A2:F" }),
-      sheets.spreadsheets.values.get({ spreadsheetId: geminiUltraSheetId, range: "Лог!A2:F" }),
       sheets.spreadsheets.values.get({ spreadsheetId: gemini3SheetId, range: "Лог!A2:F" }),
     ]);
 
     const gptRows = gptRes.data.values || [];
-    const geminiUltraRows = geminiUltraRes.data.values || [];
     const gemini3Rows = gemini3Res.data.values || [];
 
     const comparisonMap = new Map();
@@ -78,7 +74,7 @@ export async function GET(request) {
         if (!promptText) continue;
 
         if (!comparisonMap.has(promptText)) {
-          comparisonMap.set(promptText, { gpt: "", geminiUltra: "", gemini3Pro: "" });
+          comparisonMap.set(promptText, { gpt: "", gemini3Pro: "" });
         }
 
         const group = comparisonMap.get(promptText);
@@ -87,12 +83,11 @@ export async function GET(request) {
     };
 
     mergeRowToMap(gptRows, "gpt");
-    mergeRowToMap(geminiUltraRows, "geminiUltra");
     mergeRowToMap(gemini3Rows, "gemini3Pro");
 
     const resultMatrix = [];
     comparisonMap.forEach((urls, prompt) => {
-      resultMatrix.push([urls.gpt || "Ошибка", urls.geminiUltra || "Ошибка", urls.gemini3Pro || "Ошибка", prompt]);
+      resultMatrix.push([urls.gpt || "Ошибка", urls.gemini3Pro || "Ошибка", prompt]);
     });
 
     return NextResponse.json({
