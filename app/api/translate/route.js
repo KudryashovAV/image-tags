@@ -217,7 +217,6 @@ export async function POST(request) {
 }
 
 // Фоновый оркестратор переводов и проверок
-// Фоновый оркестратор переводов и проверок
 async function backgroundOrchestrator({
   app,
   phrases,
@@ -234,7 +233,7 @@ async function backgroundOrchestrator({
 
   for (const phrase of phrases) {
     let geminiTranslation = {};
-    const phraseCheckLog = {};
+    const corrections = {}; // Собираем только исправления для текущей фразы
 
     // ШАГ 1: Перевод через Gemini 3.6 Flash
     try {
@@ -276,7 +275,7 @@ async function backgroundOrchestrator({
 
           if (!checkResult.isCorrect && checkResult.correctedText !== translatedText) {
             // Записываем изменение
-            phraseCheckLog[translatedText] = checkResult.correctedText;
+            corrections[translatedText] = checkResult.correctedText;
             // Обновляем итоговый перевод
             geminiTranslation[lang] = checkResult.correctedText;
           }
@@ -286,15 +285,19 @@ async function backgroundOrchestrator({
       }
     }
 
-    // Сохраняем логи проверки, только если в этой фразе были внесены правки
-    if (Object.keys(phraseCheckLog).length > 0) {
-      masterCheckLogs.push(phraseCheckLog);
+    // Если были правки, формируем объект с оригинальной фразой и добавляем его в общий массив
+    if (Object.keys(corrections).length > 0) {
+      masterCheckLogs.push({
+        ru: phrase,
+        ...corrections,
+      });
     }
 
     // ШАГ 3: Вывод промежуточного результата фраз
     const formattedResult = JSON.stringify(geminiTranslation, null, 2);
     if (isSlack && slackChannelId && slackThreadTs) {
-      const msg = `📝 *Фраза:* "${phrase}"\n\`\`\`json\n${formattedResult}\n\`\`\``;
+      // Убрали 'json' после тройных обратных кавычек
+      const msg = `📝 *Фраза:* "${phrase}"\n\`\`\`\n${formattedResult}\n\`\`\``;
       await sendSlackMessage(slackChannelId, msg, slackThreadTs);
     } else {
       console.log(`[Готовый перевод] Фраза "${phrase}":\n`, formattedResult);
@@ -317,7 +320,8 @@ async function backgroundOrchestrator({
     const checksJsonFormatted = JSON.stringify(masterCheckLogs, null, 2);
 
     if (isSlack && slackChannelId && slackThreadTs) {
-      const finalSlackMsg = `${userMention} ${finalSummaryText}\n\`\`\`json\n${checksJsonFormatted}\n\`\`\``;
+      // И здесь тоже убрали 'json' после тройных обратных кавычек
+      const finalSlackMsg = `${userMention} ${finalSummaryText}\n\`\`\`\n${checksJsonFormatted}\n\`\`\``;
       await sendSlackMessage(slackChannelId, finalSlackMsg, slackThreadTs);
     } else {
       console.log(`${finalSummaryText}\nМассив проверок:\n`, checksJsonFormatted);
