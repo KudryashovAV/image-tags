@@ -246,15 +246,21 @@ async function backgroundOrchestrator({
 
       const result = await model.generateContent(fullGeminiPrompt);
       const responseText = result.response.text();
-      geminiTranslation = JSON.parse(responseText);
+      const parsedTranslation = JSON.parse(responseText);
+
+      // Добавляем русскую фразу на первое место в итоговый JSON
+      geminiTranslation = { ru: phrase, ...parsedTranslation };
     } catch (e) {
       console.error(`[Gemini Error] Ошибка перевода фразы "${phrase}":`, e.message);
-      geminiTranslation = { error: `Ошибка перевода Gemini: ${e.message}` };
+      geminiTranslation = { ru: phrase, error: `Ошибка перевода Gemini: ${e.message}` };
     }
 
     // ШАГ 2: Проверка перевода через GPT
     if (!geminiTranslation.error) {
       for (const [lang, translatedText] of Object.entries(geminiTranslation)) {
+        // Пропускаем проверку для русского языка (исходной фразы)
+        if (lang === "ru") continue;
+
         try {
           const gptCheckResponse = await openai.chat.completions.create({
             model: "gpt-4o",
@@ -296,7 +302,6 @@ async function backgroundOrchestrator({
     // ШАГ 3: Вывод промежуточного результата фраз
     const formattedResult = JSON.stringify(geminiTranslation, null, 2);
     if (isSlack && slackChannelId && slackThreadTs) {
-      // Убрали 'json' после тройных обратных кавычек
       const msg = `📝 *Фраза:* "${phrase}"\n\`\`\`\n${formattedResult}\n\`\`\``;
       await sendSlackMessage(slackChannelId, msg, slackThreadTs);
     } else {
@@ -320,7 +325,6 @@ async function backgroundOrchestrator({
     const checksJsonFormatted = JSON.stringify(masterCheckLogs, null, 2);
 
     if (isSlack && slackChannelId && slackThreadTs) {
-      // И здесь тоже убрали 'json' после тройных обратных кавычек
       const finalSlackMsg = `${userMention} ${finalSummaryText}\n\`\`\`\n${checksJsonFormatted}\n\`\`\``;
       await sendSlackMessage(slackChannelId, finalSlackMsg, slackThreadTs);
     } else {
