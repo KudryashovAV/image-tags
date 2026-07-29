@@ -1,13 +1,8 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// Инициализация клиентов ИИ
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
+// Инициализация Gemini API
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ID таблицы с настройками и промтами
@@ -135,24 +130,18 @@ export async function POST(request) {
       return NextResponse.json({ error: errText }, { status: 400 });
     }
 
-    // Получаем промты из Google Таблицы
+    // Получаем промт из Google Таблицы
     let systemPrompt = "";
-    let checkPrompt = "";
     const userMention = slackUserId ? `<@${slackUserId}>` : "Пользователь";
 
     try {
       const sheets = await getGoogleAuth();
       const sheetResponse = await sheets.spreadsheets.values.get({
         spreadsheetId: TRANSLATION_SHEET_ID,
-        range: "Лист1!A:F",
+        range: "Лист1!A:B",
       });
 
       const rows = sheetResponse.data.values || [];
-
-      // Ячейка F2 содержит промт для проверки
-      if (rows.length >= 2 && rows[1][5]) {
-        checkPrompt = rows[1][5].trim();
-      }
 
       // Ищем совпадение названия app в колонке A
       const matchedRow = rows.find((row) => row[0] && cleanQuotes(row[0]).toLowerCase() === app.toLowerCase());
@@ -187,7 +176,6 @@ export async function POST(request) {
         app,
         phrases,
         systemPrompt,
-        checkPrompt,
         isSlack: true,
         slackChannelId,
         slackThreadTs,
@@ -201,7 +189,6 @@ export async function POST(request) {
         app,
         phrases,
         systemPrompt,
-        checkPrompt,
         isSlack: false,
       });
 
@@ -216,12 +203,11 @@ export async function POST(request) {
   }
 }
 
-// Фоновый оркестратор переводов и проверок
+// Фоновый оркестратор переводов
 async function backgroundOrchestrator({
   app,
   phrases,
   systemPrompt,
-  checkPrompt,
   isSlack,
   slackChannelId,
   slackThreadTs,
@@ -229,11 +215,8 @@ async function backgroundOrchestrator({
 }) {
   console.log(`[Background Worker] Старт обработки ${phrases.length} фраз для app: ${app}`);
 
-  const masterCheckLogs = [];
-
   for (const phrase of phrases) {
     let geminiTranslation = {};
-    const corrections = {}; // Собираем только исправления для текущей фразы
 
     // ШАГ 1: Перевод через Gemini 3.6 Flash
     try {
@@ -248,58 +231,14 @@ async function backgroundOrchestrator({
       const responseText = result.response.text();
       const parsedTranslation = JSON.parse(responseText);
 
-      // Добавляем русскую фразу на первое место в итоговый JSON
+      // Добавляем русскую фразу первой в JSON
       geminiTranslation = { ru: phrase, ...parsedTranslation };
     } catch (e) {
       console.error(`[Gemini Error] Ошибка перевода фразы "${phrase}":`, e.message);
       geminiTranslation = { ru: phrase, error: `Ошибка перевода Gemini: ${e.message}` };
     }
 
-    // ШАГ 2: Проверка перевода через GPT
-    if (!geminiTranslation.error) {
-      for (const [lang, translatedText] of Object.entries(geminiTranslation)) {
-        // Пропускаем проверку для русского языка (исходной фразы)
-        if (lang === "ru") continue;
-
-        try {
-          const gptCheckResponse = await openai.chat.completions.create({
-            model: "gpt-4o",
-            messages: [
-              {
-                role: "system",
-                content: checkPrompt || "Ты профессиональный корректор переводов.",
-              },
-              {
-                role: "user",
-                content: `Исходная фраза на русском: "${phrase}"\nЯзык перевода: ${lang}\nПереведенный вариант: "${translatedText}"\n\nОцени правильность перевода. Верни строго JSON вида: {"isCorrect": boolean, "correctedText": "исправленная фраза или оригинальный перевод если всё верно"}`,
-              },
-            ],
-            response_format: { type: "json_object" },
-          });
-
-          const checkResult = JSON.parse(gptCheckResponse.choices[0].message.content);
-
-          if (!checkResult.isCorrect && checkResult.correctedText !== translatedText) {
-            // Записываем изменение
-            corrections[translatedText] = checkResult.correctedText;
-            // Обновляем итоговый перевод
-            geminiTranslation[lang] = checkResult.correctedText;
-          }
-        } catch (gptErr) {
-          console.error(`[GPT Check Error] Язык ${lang}:`, gptErr.message);
-        }
-      }
-    }
-
-    // Если были правки, формируем объект с оригинальной фразой и добавляем его в общий массив
-    if (Object.keys(corrections).length > 0) {
-      masterCheckLogs.push({
-        ru: phrase,
-        ...corrections,
-      });
-    }
-
-    // ШАГ 3: Вывод промежуточного результата фраз
+    // ШАГ 2: Вывод готового перевода по мере получения
     const formattedResult = JSON.stringify(geminiTranslation, null, 2);
     if (isSlack && slackChannelId && slackThreadTs) {
       const msg = `📝 *Фраза:* "${phrase}"\n\`\`\`\n${formattedResult}\n\`\`\``;
@@ -309,26 +248,13 @@ async function backgroundOrchestrator({
     }
   }
 
-  // ШАГ 4: Финальное сообщение после обработки всех фраз
+  // ШАГ 3: Финальное сообщение после обработки всех фраз
   const finalSummaryText = `Всё готово! Обработано ${phrases.length} фраз`;
 
-  if (masterCheckLogs.length === 0) {
-    const noErrorsText = "Массив проверок пуст, переводы удались качественными с первого раза.";
-
-    if (isSlack && slackChannelId && slackThreadTs) {
-      const finalSlackMsg = `${userMention} ${finalSummaryText}\n${noErrorsText}`;
-      await sendSlackMessage(slackChannelId, finalSlackMsg, slackThreadTs);
-    } else {
-      console.log(`${finalSummaryText}\n${noErrorsText}`);
-    }
+  if (isSlack && slackChannelId && slackThreadTs) {
+    const finalSlackMsg = `${userMention} ${finalSummaryText}`;
+    await sendSlackMessage(slackChannelId, finalSlackMsg, slackThreadTs);
   } else {
-    const checksJsonFormatted = JSON.stringify(masterCheckLogs, null, 2);
-
-    if (isSlack && slackChannelId && slackThreadTs) {
-      const finalSlackMsg = `${userMention} ${finalSummaryText}\n\`\`\`\n${checksJsonFormatted}\n\`\`\``;
-      await sendSlackMessage(slackChannelId, finalSlackMsg, slackThreadTs);
-    } else {
-      console.log(`${finalSummaryText}\nМассив проверок:\n`, checksJsonFormatted);
-    }
+    console.log(finalSummaryText);
   }
 }
