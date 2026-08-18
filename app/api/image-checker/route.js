@@ -1,262 +1,224 @@
 import { NextResponse } from "next/server";
 import admin from "firebase-admin";
+// TODO: Вынесите логику из levels-checker в отдельную утилиту lib/checker.js
 import { getChaptersLevels } from "../levels-checker/route";
-// import { Storage } from "@google-cloud/storage";
 
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.CS_GOOGLE_SERVICE_ACCOUNT_KEY)),
+    credential: admin.credential.cert(JSON.parse(process.env.CS_GOOGLE_SERVICE_ACCOUNT_KEY || "{}")),
   });
 }
 
-const getChaptersConfig = async () => {
-  const template = await admin.remoteConfig().getTemplate();
-
-  return {
-    chapterUrl: JSON.parse(
-      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
-    ).url_config_chapters,
-    chaptersCount: JSON.parse(
-      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
-    ).count_chapters,
-    levelUrl: JSON.parse(
-      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
-    ).url_texture_level,
-    chapterImageUrl: JSON.parse(
-      Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
-    ).url_texture_chapter,
-  };
-};
-
-const getEventsConfig = async () => {
-  const template = await admin.remoteConfig().getTemplate();
-
-  return {
-    config_levels: JSON.parse(template.parameters.js_resources_events.defaultValue.value).config_levels.url_config,
-    config_schedule: JSON.parse(template.parameters.js_resources_events.defaultValue.value).config_schedule.url_config,
-    url_texture_level: JSON.parse(template.parameters.js_resources_events.defaultValue.value).url_texture_level,
-  };
-};
-
-const fetchEventConfig = async (url) => {
-  const response = await fetch(url);
-  const data = await response.json();
-  return data;
-};
-
-function isDateInCurrentWeek(dateString) {
-  const parts = dateString.split(" ")[0].split(".");
-  const day = parseInt(parts[0], 10);
-  const month = parseInt(parts[1], 10) - 1; // Месяцы в JS начинаются с 0
-  const year = parseInt(parts[2], 10);
-
-  const date = new Date(year, month, day);
-  const today = new Date();
-
-  const currentDayOfWeek = today.getDay();
-  let daysToMonday = currentDayOfWeek === 0 ? 6 : currentDayOfWeek - 1;
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - daysToMonday);
-  monday.setHours(0, 0, 0, 0);
-
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
-  sunday.setHours(23, 59, 59, 999);
-
-  return date >= monday && date <= sunday;
+// Вспомогательная функция: выполнение массива задач пачками с ограничением параллельности
+async function mapConcurrent(items, limit, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const chunk = items.slice(i, i + limit);
+    const chunkResults = await Promise.all(chunk.map(fn));
+    results.push(...chunkResults);
+  }
+  return results;
 }
 
-const fetchEvents = async () => {
-  const eventsData = await getEventsConfig();
-  const eventConfig = eventsData.config_schedule;
-  const eventLevelsUrl = eventsData.url_texture_level;
-  const eventConfigUrl = eventsData.config_levels;
-  const currentYear = new Date().getFullYear();
-
-  const eventConfigPath = eventConfig.replace("/events_{0}.json", `/events_${currentYear}.json`);
-
-  const eventJsonConfig = await fetchEventConfig(eventConfigPath);
-
-  const events = eventJsonConfig.events_base.map((item, index) => ({
-    id: item.id,
-    time_start: item.time_start,
-    index: index,
-  }));
-
-  function getEventsForNextWeeks(events) {
-    const now = new Date();
-
-    // Получаем начало текущей недели (понедельник)
-    const currentDay = now.getDay();
-    const mondayOffset = currentDay === 0 ? 6 : currentDay - 1;
-    const startOfCurrentWeek = new Date(now);
-    startOfCurrentWeek.setDate(now.getDate() - mondayOffset);
-    startOfCurrentWeek.setHours(0, 0, 0, 0);
-
-    // Конец 3й недели от текущей (через 4 недели)
-    const endOfFourthWeek = new Date(startOfCurrentWeek);
-    endOfFourthWeek.setDate(startOfCurrentWeek.getDate() + 4 * 7 - 1); // 27 дней
-    endOfFourthWeek.setHours(23, 59, 59, 999);
-
-    // Фильтруем события
-    return events.filter((event) => {
-      // Парсим дату из строки '25.05.2026 00:01:00'
-      const [datePart] = event.time_start.split(" ");
-      const [day, month, year] = datePart.split(".");
-      const eventDate = new Date(year, month - 1, day);
-
-      return eventDate >= startOfCurrentWeek && eventDate <= endOfFourthWeek;
+// Запрос с авто-повтором при сбросе соединения (ECONNRESET)
+async function fetchWithRetry(url, options = {}, retries = 3, delay = 300) {
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        Accept: "application/json",
+        ...options.headers,
+      },
     });
+    return res;
+  } catch (err) {
+    if (retries <= 0) throw err;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return fetchWithRetry(url, options, retries - 1, delay * 2);
   }
+}
 
-  const nearEventsIds = getEventsForNextWeeks(events).map((item) => item.id);
-
-  const brokenEvents = []; // если массив не пуст - беда
-  const eventsWithoutConfig = []; // если массив не пуст - беда
-
-  for (const eventName of nearEventsIds) {
-    await checkIfAllEventsLevelsPersists(eventLevelsUrl, eventName, brokenEvents);
-  }
-
-  for (const eventName of nearEventsIds) {
-    await checkIfAllEventsConfigPersists(eventConfigUrl, eventName, eventsWithoutConfig);
-  }
-
-  if (brokenEvents.length > 0) {
-    return `Так же проверены события. События с ID ${nearEventsIds} имеют недостающие уровни или обложку`;
-  } else if (eventsWithoutConfig.length > 0) {
-    return `Так же проверены события. События с ID ${nearEventsIds} имеют недостающий конфиг`;
-  } else if (brokenEvents.length === 0 && eventsWithoutConfig.length === 0 && nearEventsIds.length < 4) {
-    return `:alert-1: Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и две обложки(regular и low качества). Только ближайшие ${nearEventsIds.length} недель имеют события. Обратите внимание, что нужно ещё хотя бы ${4 - nearEventsIds.length} событий в запасе!`;
-  } else {
-    return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds}. В каждом событии 36 уровней и две обложки(regular и low качества).`;
-  }
-};
-
-const checkIfAllEventsLevelsPersists = async (url, eventName, brokenEvents) => {
-  for (let x = 1; x <= 36; x++) {
-    const levelStatus = await checkStatus(url.replace("/{0}/{1}.jpg", `/${eventName}/${x}.jpg`));
-
-    if (levelStatus != 200 || levelStatus != "200") {
-      brokenEvents.push(eventName);
-    }
-  }
-  const coverStatus = await checkStatus(url.replace("/{0}/{1}.jpg", `/${eventName}/card_1.jpg`));
-  if (coverStatus != 200 || coverStatus != "200") {
-    brokenEvents.push(eventName);
-  }
-  const lowCoverStatus = await checkStatus(url.replace("/{0}/{1}.jpg", `/${eventName}/card_1_low.jpg`));
-  if (lowCoverStatus != 200 || lowCoverStatus != "200") {
-    brokenEvents.push(eventName);
-  }
-};
-
-const checkIfAllEventsConfigPersists = async (url, eventName, eventsWithoutConfig) => {
-  const configStatus = await checkStatus(url.replace("/event_{0}.json", `/event_${eventName}.json`));
-
-  if (configStatus != 200 || configStatus != "200") {
-    eventsWithoutConfig.push(eventName);
-  }
-};
-
+// Проверка существования ресурса через HEAD-запрос
 async function checkStatus(url) {
   try {
-    const response = await fetch(url, {
-      method: "HEAD",
-      cache: "no-cache",
-    });
-
-    return response.status;
-  } catch (error) {
-    return "Error 404";
+    const response = await fetchWithRetry(url, { method: "HEAD", cache: "no-cache" }, 2, 200);
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 
-const fetchConfig = async () => {
-  const chapteData = await getChaptersConfig();
+function parseConfigs(template) {
+  const chapterGroup = template.parameterGroups?.["Chapters"];
+  const chapterRaw = Object.entries(chapterGroup || {})[0]?.[1]?.js_resources_chapters?.defaultValue?.value;
+  const chapterJson = chapterRaw ? JSON.parse(chapterRaw) : {};
 
-  const levelPath = chapteData.levelUrl.replace("/chapter_{0}/{1}.jpg", "");
-  const chapterImagePath = chapteData.chapterImageUrl.replace("/card_chapter_{0}.jpg", "");
+  const eventsRaw = template.parameters?.js_resources_events?.defaultValue?.value;
+  const eventsJson = eventsRaw ? JSON.parse(eventsRaw) : {};
 
-  const brokenChapters = [];
-  for (let i = 1; i <= chapteData.chaptersCount; i++) {
-    const chapterStatus = await checkStatus(`${chapterImagePath}/card_chapter_${i}.jpg`);
+  const replaceCdn = (url) => url?.replace("jigsaw-solitaire.malpacdn.com", "storage.googleapis.com/jigsaw_solitaire");
 
-    if (chapterStatus != 200 || chapterStatus != "200") {
-      brokenChapters.push(i);
+  return {
+    chapters: {
+      chapterUrl: replaceCdn(chapterJson.url_config_chapters),
+      chaptersCount: chapterJson.count_chapters || 0,
+      levelUrl: replaceCdn(chapterJson.url_texture_level),
+      chapterImageUrl: replaceCdn(chapterJson.url_texture_chapter),
+      rawConfig: chapterJson,
+    },
+    events: {
+      config_levels: replaceCdn(eventsJson.config_levels?.url_config),
+      config_schedule: replaceCdn(eventsJson.config_schedule?.url_config),
+      url_texture_level: replaceCdn(eventsJson.url_texture_level),
+    },
+  };
+}
+
+function filterUpcomingEvents(events) {
+  const now = new Date();
+  const currentDay = now.getDay();
+  const mondayOffset = currentDay === 0 ? 6 : currentDay - 1;
+
+  const startOfCurrentWeek = new Date(now);
+  startOfCurrentWeek.setDate(now.getDate() - mondayOffset);
+  startOfCurrentWeek.setHours(0, 0, 0, 0);
+
+  const endOfFourthWeek = new Date(startOfCurrentWeek);
+  endOfFourthWeek.setDate(startOfCurrentWeek.getDate() + 28 - 1);
+  endOfFourthWeek.setHours(23, 59, 59, 999);
+
+  return events.filter((event) => {
+    const [datePart] = event.time_start.split(" ");
+    const [day, month, year] = datePart.split(".");
+    const eventDate = new Date(year, month - 1, day);
+    return eventDate >= startOfCurrentWeek && eventDate <= endOfFourthWeek;
+  });
+}
+
+async function validateEventResources(eventsConfig) {
+  const currentYear = new Date().getFullYear();
+  const eventConfigPath = eventsConfig.config_schedule.replace("{0}", currentYear);
+
+  const response = await fetchWithRetry(eventConfigPath);
+  if (!response.ok) throw new Error(`Failed to fetch event schedule JSON (Status: ${response.status})`);
+  const eventJsonConfig = await response.json();
+
+  const upcomingEvents = filterUpcomingEvents(eventJsonConfig.events_base || []);
+  const nearEventsIds = upcomingEvents.map((e) => e.id);
+
+  const brokenEvents = new Set();
+  const eventsWithoutConfig = new Set();
+
+  // Проверяем события пачками по 5 штук
+  await mapConcurrent(nearEventsIds, 5, async (eventName) => {
+    const configUrl = eventsConfig.config_levels.replace("{0}", eventName);
+    if (!(await checkStatus(configUrl))) {
+      eventsWithoutConfig.add(eventName);
     }
 
-    for (let x = 1; x <= 25; x++) {
-      // console.log("response", i, x);
-      const levelStatus = await checkStatus(`${levelPath}/chapter_${i}/${x}.jpg`);
+    const urlsToCheck = [
+      eventsConfig.url_texture_level.replace("/{0}/{1}.jpg", `/${eventName}/card_1.jpg`),
+      eventsConfig.url_texture_level.replace("/{0}/{1}.jpg", `/${eventName}/card_1_low.jpg`),
+      ...Array.from({ length: 36 }, (_, i) =>
+        eventsConfig.url_texture_level.replace("/{0}/{1}.jpg", `/${eventName}/${i + 1}.jpg`),
+      ),
+    ];
 
-      if (levelStatus != 200 || levelStatus != "200") {
-        brokenChapters.push(i);
-      }
+    // Внутри одного события проверяем URL пачками по 10 штук
+    const results = await mapConcurrent(urlsToCheck, 10, checkStatus);
+    if (results.some((isOk) => !isOk)) {
+      brokenEvents.add(eventName);
     }
+  });
+
+  const brokenArray = Array.from(brokenEvents);
+  const noConfigArray = Array.from(eventsWithoutConfig);
+
+  if (brokenArray.length > 0) {
+    return `:alert-1: Так же проверены события. События с ID ${brokenArray.join(", ")} имеют недостающие уровни или обложку`;
+  }
+  if (noConfigArray.length > 0) {
+    return `:alert-1: Так же проверены события. События с ID ${noConfigArray.join(", ")} имеют недостающий конфиг`;
+  }
+  if (nearEventsIds.length < 4) {
+    return `:alert-1: Проверены уровни и конфиги для ${nearEventsIds.join(", ")}. Доступно всего ${nearEventsIds.length} событий. Нужно ещё хотя бы ${4 - nearEventsIds.length} в запасе!`;
   }
 
-  return brokenChapters;
-};
+  return `Так же проверены события. Проверены уровни и конфиги для ${nearEventsIds.join(", ")}. В каждом событии 36 уровней и две обложки.`;
+}
+
+async function validateChapters(chaptersConfig) {
+  const levelPath = chaptersConfig.levelUrl.replace("/chapter_{0}/{1}.jpg", "");
+  const chapterImagePath = chaptersConfig.chapterImageUrl.replace("/card_chapter_{0}.jpg", "");
+
+  const brokenChapters = new Set();
+  const chapterNumbers = Array.from({ length: chaptersConfig.chaptersCount }, (_, i) => i + 1);
+
+  // Проверяем главы пачками по 3 главы за раз
+  await mapConcurrent(chapterNumbers, 3, async (chapterNum) => {
+    const urlsToCheck = [
+      `${chapterImagePath}/card_chapter_${chapterNum}.jpg`,
+      ...Array.from({ length: 25 }, (_, x) => `${levelPath}/chapter_${chapterNum}/${x + 1}.jpg`),
+    ];
+
+    // Файлы внутри главы проверяем пачками по 10 штук
+    const results = await mapConcurrent(urlsToCheck, 10, checkStatus);
+    if (results.some((isOk) => !isOk)) {
+      brokenChapters.add(chapterNum);
+    }
+  });
+
+  return Array.from(brokenChapters).sort((a, b) => a - b);
+}
+
+function formatDateTime(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())} ${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()}`;
+}
 
 export async function GET() {
   try {
     const template = await admin.remoteConfig().getTemplate();
+    const { chapters, events } = parseConfigs(template);
 
-    function formatDateTime(date) {
-      const hours = String(date.getHours()).padStart(2, "0");
-      const minutes = String(date.getMinutes()).padStart(2, "0");
-      const day = String(date.getDate()).padStart(2, "0");
-      const month = String(date.getMonth() + 1).padStart(2, "0"); // +1 потому что месяцы с 0
-      const year = date.getFullYear();
+    // Выполняем проверки последовательно, чтобы избегать сетевых пиков
+    const brokenChapters = await validateChapters(chapters);
+    const newChaptersData = await getChaptersLevels();
+    const eventsReport = await validateEventResources(events);
 
-      return `${hours}:${minutes} ${day}-${month}-${year}`;
-    }
+    const finishTime = formatDateTime(new Date());
 
-    const configValues = {};
-    Object.entries(template.parameters).forEach(([key, value]) => {
-      configValues[key] = value.defaultValue.value;
+    const newChaptersMessage =
+      newChaptersData.brokenChapters.length > 0
+        ? `ВСЁ ПЛОХО! (( Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${finishTime} для ${newChaptersData.chapterUrl}`
+        : `ВСЁ ОК! Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${finishTime} для ${newChaptersData.chapterUrl}`;
+
+    const oldChaptersMessage =
+      brokenChapters.length > 0
+        ? `ВСЁ ПЛОХО! (( Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brokenChapters.join(", ")}. Проверка совершена ${finishTime} для ${chapters.chapterUrl}`
+        : `ВСЁ ОК! Для версий 1.10 и старше проверены все ${chapters.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${finishTime} для ${chapters.chapterUrl}`;
+
+    const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        OldBrokenChapters: oldChaptersMessage,
+        NewBrokenChapters: newChaptersMessage,
+        events: eventsReport,
+      }),
     });
-    const chapteData = await getChaptersConfig();
-    const chaptersCount = chapteData.chaptersCount;
-    const chapterUrl = chapteData.chapterUrl;
 
-    const brockenChapters = await fetchConfig();
-    const finishTime = new Date();
-
-    const newChaptersResponse = await getChaptersLevels();
-    const newChaptersData = await newChaptersResponse.json();
-
-    const newChaptersBadMessage = `ВСЁ ПЛОХО! (( Для версий 1.11 и младше некоторые изображения в этих главах отсутствуют - ${newChaptersData.brokenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
-    const newChaptersGoodMessage = `ВСЁ ОК! Для версий 1.11 и младше проверены все ${newChaptersData.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${newChaptersData.chapterUrl}`;
-
-    const oldChaptersBadMessage = `ВСЁ ПЛОХО! (( Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brockenChapters.join(", ")}. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
-    const oldChaptersGoodMessage = `ВСЁ ОК! Для версий 1.10 и старше проверены все ${chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${formatDateTime(finishTime)} для ${chapterUrl}`;
-
-    try {
-      const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          OldBrokenChapters: `${brockenChapters.length > 0 ? oldChaptersBadMessage : oldChaptersGoodMessage}`,
-          NewBrokenChapters: `${newChaptersData.brokenChapters.length > 0 ? newChaptersBadMessage : newChaptersGoodMessage}`,
-          events: await fetchEvents(),
-        }),
-      });
-
-      if (!slackResponse.ok) throw new Error("Slack API error");
-
-      return NextResponse.json({
-        success: true,
-        sent: JSON.parse(
-          Object.entries(template.parameterGroups["Chapters"])[0][1].js_resources_chapters.defaultValue.value,
-        ),
-      });
-    } catch (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (!slackResponse.ok) {
+      throw new Error(`Slack Webhook Error: ${slackResponse.statusText}`);
     }
+
+    return NextResponse.json({
+      success: true,
+      sent: chapters.rawConfig,
+    });
   } catch (error) {
-    console.error("Remote Config Error:", error);
+    console.error("Endpoint Validation Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
