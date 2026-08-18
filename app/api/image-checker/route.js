@@ -20,33 +20,33 @@ async function mapConcurrent(items, limit, fn) {
   return results;
 }
 
-// Запрос с авто-повтором при сбросе соединения (ECONNRESET)
-async function fetchWithRetry(url, options = {}, retries = 3, delay = 300) {
-  try {
-    const res = await fetch(url, {
-      ...options,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept: "application/json",
-        ...options.headers,
-      },
-    });
-    return res;
-  } catch (err) {
-    if (retries <= 0) throw err;
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    return fetchWithRetry(url, options, retries - 1, delay * 2);
-  }
-}
+// Проверка существования ресурса с кулдауном и повторами (всего 3 попытки)
+async function checkStatus(url, retries = 2, delayMs = 500) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "HEAD",
+        cache: "no-cache",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          Accept: "application/json, image/*",
+        },
+      });
 
-// Проверка существования ресурса через HEAD-запрос
-async function checkStatus(url) {
-  try {
-    const response = await fetchWithRetry(url, { method: "HEAD", cache: "no-cache" }, 2, 200);
-    return response.ok;
-  } catch {
-    return false;
+      if (response.ok) {
+        return true;
+      }
+    } catch (err) {
+      // Игнорируем ошибки сети на промежуточных попытках
+    }
+
+    // Если это не последняя попытка — делаем кулдаун
+    if (attempt < retries) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
+
+  return false; // Ошибка фиксируется только если все 3 запроса вернули не 200 / упали с ошибкой
 }
 
 function parseConfigs(template) {
@@ -100,7 +100,9 @@ async function validateEventResources(eventsConfig) {
   const currentYear = new Date().getFullYear();
   const eventConfigPath = eventsConfig.config_schedule.replace("{0}", currentYear);
 
-  const response = await fetchWithRetry(eventConfigPath);
+  const response = await fetch(eventConfigPath, {
+    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+  });
   if (!response.ok) throw new Error(`Failed to fetch event schedule JSON (Status: ${response.status})`);
   const eventJsonConfig = await response.json();
 
@@ -110,7 +112,6 @@ async function validateEventResources(eventsConfig) {
   const brokenEvents = new Set();
   const eventsWithoutConfig = new Set();
 
-  // Проверяем события пачками по 5 штук
   await mapConcurrent(nearEventsIds, 5, async (eventName) => {
     const configUrl = eventsConfig.config_levels.replace("{0}", eventName);
     if (!(await checkStatus(configUrl))) {
@@ -125,7 +126,6 @@ async function validateEventResources(eventsConfig) {
       ),
     ];
 
-    // Внутри одного события проверяем URL пачками по 10 штук
     const results = await mapConcurrent(urlsToCheck, 10, checkStatus);
     if (results.some((isOk) => !isOk)) {
       brokenEvents.add(eventName);
@@ -152,29 +152,40 @@ async function validateChapters(chaptersConfig) {
   const levelPath = chaptersConfig.levelUrl.replace("/chapter_{0}/{1}.jpg", "");
   const chapterImagePath = chaptersConfig.chapterImageUrl.replace("/card_chapter_{0}.jpg", "");
 
-  const brokenChapters = new Set();
+  const brokenChapters = [];
   const chapterNumbers = Array.from({ length: chaptersConfig.chaptersCount }, (_, i) => i + 1);
 
-  // Проверяем главы пачками по 3 главы за раз
   await mapConcurrent(chapterNumbers, 3, async (chapterNum) => {
-    const urlsToCheck = [
-      `${chapterImagePath}/card_chapter_${chapterNum}.jpg`,
-      ...Array.from({ length: 25 }, (_, x) => `${levelPath}/chapter_${chapterNum}/${x + 1}.jpg`),
+    // Список файлов главы с именами для подробного отчёта
+    const itemsToCheck = [
+      { id: "обложка", url: `${chapterImagePath}/card_chapter_${chapterNum}.jpg` },
+      ...Array.from({ length: 25 }, (_, x) => ({
+        id: `${x + 1}`,
+        url: `${levelPath}/chapter_${chapterNum}/${x + 1}.jpg`,
+      })),
     ];
 
-    // Файлы внутри главы проверяем пачками по 10 штук
-    const results = await mapConcurrent(urlsToCheck, 10, checkStatus);
-    if (results.some((isOk) => !isOk)) {
-      brokenChapters.add(chapterNum);
+    const results = await mapConcurrent(itemsToCheck, 10, async (item) => {
+      const isOk = await checkStatus(item.url);
+      return { id: item.id, isOk };
+    });
+
+    const missingImages = results.filter((res) => !res.isOk).map((res) => res.id);
+
+    if (missingImages.length > 0) {
+      brokenChapters.push({
+        chapterNum,
+        missingImages,
+      });
     }
   });
 
-  return Array.from(brokenChapters).sort((a, b) => a - b);
+  return brokenChapters.sort((a, b) => a.chapterNum - b.chapterNum);
 }
 
 function formatDateTime(date) {
   const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(date.getHours())}:${pad(date.getMinutes())} ${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()}`;
+  return `${pad(date.getHours())}:${pad(date.getMinutes())} ${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${pad(date.getFullYear())}`;
 }
 
 export async function GET() {
@@ -182,12 +193,15 @@ export async function GET() {
     const template = await admin.remoteConfig().getTemplate();
     const { chapters, events } = parseConfigs(template);
 
-    // Выполняем проверки последовательно, чтобы избегать сетевых пиков
     const brokenChapters = await validateChapters(chapters);
     const newChaptersData = await getChaptersLevels();
     const eventsReport = await validateEventResources(events);
 
     const finishTime = formatDateTime(new Date());
+
+    const formattedOldBroken = brokenChapters
+      .map((item) => `Глава ${item.chapterNum} (не найдены: ${item.missingImages.join(", ")})`)
+      .join("; ");
 
     const newChaptersMessage =
       newChaptersData.brokenChapters.length > 0
@@ -196,7 +210,7 @@ export async function GET() {
 
     const oldChaptersMessage =
       brokenChapters.length > 0
-        ? `ВСЁ ПЛОХО! (( Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${brokenChapters.join(", ")}. Проверка совершена ${finishTime} для ${chapters.chapterUrl}`
+        ? `ВСЁ ПЛОХО! (( Для версий 1.10 и старше некоторые изображения в этих главах отсутствуют - ${formattedOldBroken}. Проверка совершена ${finishTime} для ${chapters.chapterUrl}`
         : `ВСЁ ОК! Для версий 1.10 и старше проверены все ${chapters.chaptersCount} глав - в каждой главе по 25 изображений. Проверка совершена ${finishTime} для ${chapters.chapterUrl}`;
 
     const slackResponse = await fetch(process.env.SLACK_WEBHOOK_URL, {

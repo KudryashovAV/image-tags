@@ -12,6 +12,27 @@ const GCS_DESTINATION = "storage.googleapis.com/jigsaw_solitaire";
 
 const normalizeUrl = (url = "") => url.replace(CDN_ORIGIN, GCS_DESTINATION);
 
+// Вспомогательная функция задержки
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Проверка URL с 3 попытками (1 основная + 2 повторных) и кулдауном
+const isUrlValid = async (url, retries = 2, cooldownMs = 500) => {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, { method: "HEAD", cache: "no-cache" });
+      if (response.ok) return true;
+    } catch {
+      // Игнорируем сетевые ошибки для последующих повторных попыток
+    }
+
+    // Кулдаун перед следующей попыткой
+    if (attempt < retries) {
+      await delay(cooldownMs);
+    }
+  }
+  return false;
+};
+
 const getChaptersConfig = async () => {
   const template = await admin.remoteConfig().getTemplate();
   const chaptersGroup = Object.values(template.parameterGroups["Chapters"] || {})[0];
@@ -29,31 +50,25 @@ const getChaptersConfig = async () => {
   };
 };
 
-const isUrlValid = async (url) => {
-  try {
-    const response = await fetch(url, { method: "HEAD", cache: "no-cache" });
-    return response.ok;
-  } catch {
-    return false;
-  }
-};
-
 export const checkConfig = async () => {
   const config = await getChaptersConfig();
 
   const levelBasePath = config.levelUrl.replace("/chapter_{0}/{1}.jpg", "");
   const chapterImageBasePath = config.chapterImageUrl.replace("/card_chapter_{0}.jpg", "");
 
-  const brokenChaptersSet = new Set();
+  const brokenChapters = [];
   const chaptersData = {};
 
   const chapterTasks = Array.from({ length: config.chaptersCount }, async (_, index) => {
     const chapterId = index + 1;
+    const missingImages = [];
 
     // Проверяем обложку главы
     const cardUrl = `${chapterImageBasePath}/card_chapter_${chapterId}.jpg`;
     const isCardValid = await isUrlValid(cardUrl);
-    if (!isCardValid) brokenChaptersSet.add(chapterId);
+    if (!isCardValid) {
+      missingImages.push("card"); // Ошибка в обложке
+    }
 
     // Параллельно проверяем уровни главы
     const levels = [];
@@ -63,17 +78,31 @@ export const checkConfig = async () => {
       levels[levelIndex] = levelUrl;
 
       const isLevelValid = await isUrlValid(levelUrl);
-      if (!isLevelValid) brokenChaptersSet.add(chapterId);
+      if (!isLevelValid) {
+        missingImages.push(levelNum); // Номер отсутствующего уровня
+      }
     });
 
     await Promise.all(levelTasks);
     chaptersData[chapterId] = levels;
+
+    // Если в главе найдены битые файлы, фиксируем ID главы и список номеров/типов картинок
+    if (missingImages.length > 0) {
+      brokenChapters.push({
+        chapterId,
+        missingImages: missingImages.sort((a, b) => {
+          if (typeof a === "string") return -1;
+          if (typeof b === "string") return 1;
+          return a - b;
+        }),
+      });
+    }
   });
 
   await Promise.all(chapterTasks);
 
   return {
-    brokenChapters: Array.from(brokenChaptersSet),
+    brokenChapters,
     chaptersData,
     chaptersCount: config.chaptersCount,
     chapterUrl: config.chapterUrl,
@@ -149,7 +178,6 @@ export async function GET() {
 export async function getChaptersLevels() {
   try {
     const data = await checkConfig();
-
     return data;
   } catch (error) {
     console.error("Remote Config Error:", error);
