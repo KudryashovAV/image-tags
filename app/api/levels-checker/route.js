@@ -12,26 +12,34 @@ const GCS_DESTINATION = "storage.googleapis.com/jigsaw_solitaire";
 
 const normalizeUrl = (url = "") => url.replace(CDN_ORIGIN, GCS_DESTINATION);
 
-// Вспомогательная функция задержки
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Проверка URL с 3 попытками (1 основная + 2 повторных) и кулдауном
-const isUrlValid = async (url, retries = 2, cooldownMs = 500) => {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const response = await fetch(url, { method: "HEAD", cache: "no-cache" });
-      if (response.ok) return true;
-    } catch {
-      // Игнорируем сетевые ошибки для последующих повторных попыток
-    }
-
-    // Кулдаун перед следующей попыткой
-    if (attempt < retries) {
-      await delay(cooldownMs);
-    }
+// --- ДОБАВЛЕНО: Хелпер для выполнения задач батчами (ограничиваем поток запросов) ---
+const runInBatches = async (items, batchSize, fn) => {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    const chunkResults = await Promise.all(chunk.map(fn));
+    results.push(...chunkResults);
   }
-  return false;
+  return results;
 };
+
+// Проверка одного URL
+const isUrlValid = async (url) => {
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      cache: "no-cache",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        Accept: "application/json, image/*",
+      },
+    });
+    return response.ok;
+  } catch (error) {
+    return false;
+  }
+};
+// ----------------------------------------------------------------------------------
 
 const getChaptersConfig = async () => {
   const template = await admin.remoteConfig().getTemplate();
@@ -56,50 +64,65 @@ export const checkConfig = async () => {
   const levelBasePath = config.levelUrl.replace("/chapter_{0}/{1}.jpg", "");
   const chapterImageBasePath = config.chapterImageUrl.replace("/card_chapter_{0}.jpg", "");
 
-  const brokenChapters = [];
-  const chaptersData = {};
-
-  const chapterTasks = Array.from({ length: config.chaptersCount }, async (_, index) => {
+  // --- ДОБАВЛЕНО: Собираем абсолютно все ссылки в один плоский массив ---
+  const allTasks = [];
+  for (let index = 0; index < config.chaptersCount; index++) {
     const chapterId = index + 1;
-    const missingImages = [];
 
-    // Проверяем обложку главы
-    const cardUrl = `${chapterImageBasePath}/card_chapter_${chapterId}.jpg`;
-    const isCardValid = await isUrlValid(cardUrl);
-    if (!isCardValid) {
-      missingImages.push("card"); // Ошибка в обложке
-    }
-
-    // Параллельно проверяем уровни главы
-    const levels = [];
-    const levelTasks = Array.from({ length: 25 }, async (_, levelIndex) => {
-      const levelNum = levelIndex + 1;
-      const levelUrl = `${levelBasePath}/chapter_${chapterId}/${levelNum}.jpg`;
-      levels[levelIndex] = levelUrl;
-
-      const isLevelValid = await isUrlValid(levelUrl);
-      if (!isLevelValid) {
-        missingImages.push(levelNum); // Номер отсутствующего уровня
-      }
+    // Обложка
+    allTasks.push({
+      chapterId,
+      type: "card",
+      url: `${chapterImageBasePath}/card_chapter_${chapterId}.jpg`,
     });
 
-    await Promise.all(levelTasks);
-    chaptersData[chapterId] = levels;
-
-    // Если в главе найдены битые файлы, фиксируем ID главы и список номеров/типов картинок
-    if (missingImages.length > 0) {
-      brokenChapters.push({
+    // Уровни
+    for (let levelIndex = 0; levelIndex < 25; levelIndex++) {
+      const levelNum = levelIndex + 1;
+      allTasks.push({
         chapterId,
-        missingImages: missingImages.sort((a, b) => {
-          if (typeof a === "string") return -1;
-          if (typeof b === "string") return 1;
-          return a - b;
-        }),
+        type: levelNum,
+        url: `${levelBasePath}/chapter_${chapterId}/${levelNum}.jpg`,
       });
+    }
+  }
+
+  // --- ДОБАВЛЕНО: Выполняем проверки строго по 15 параллельных запросов за раз ---
+  const CONCURRENCY_LIMIT = 15;
+  const checkResults = await runInBatches(allTasks, CONCURRENCY_LIMIT, async (task) => {
+    const isValid = await isUrlValid(task.url);
+    return { ...task, isValid };
+  });
+
+  // --- ДОБАВЛЕНО: Группируем результаты обратно по главам ---
+  const brokenChaptersMap = {};
+  const chaptersData = {};
+
+  for (let index = 0; index < config.chaptersCount; index++) {
+    chaptersData[index + 1] = [];
+  }
+
+  checkResults.forEach(({ chapterId, type, url, isValid }) => {
+    if (type !== "card") {
+      chaptersData[chapterId].push(url);
+    }
+
+    if (!isValid) {
+      if (!brokenChaptersMap[chapterId]) {
+        brokenChaptersMap[chapterId] = [];
+      }
+      brokenChaptersMap[chapterId].push(type);
     }
   });
 
-  await Promise.all(chapterTasks);
+  const brokenChapters = Object.entries(brokenChaptersMap).map(([chapterId, missingImages]) => ({
+    chapterId: Number(chapterId),
+    missingImages: missingImages.sort((a, b) => {
+      if (typeof a === "string") return -1;
+      if (typeof b === "string") return 1;
+      return a - b;
+    }),
+  }));
 
   return {
     brokenChapters,
