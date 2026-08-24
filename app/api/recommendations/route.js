@@ -14,24 +14,36 @@ const COLLECTION_NAME = "MasterpieceRecommendations";
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { currentLevelId, history = [] } = body;
+    const history = body.history || [];
+    const paramsCurrentLevelId = body.currentLevelId;
 
-    if (!currentLevelId) {
-      return NextResponse.json({ error: "currentLevelId is required" }, { status: 400 });
+    // 1. Преобразуем входящий currentLevelId (строку) в целое число
+    const currentLevelId = parseInt(paramsCurrentLevelId, 10);
+
+    if (isNaN(currentLevelId)) {
+      return NextResponse.json(
+        { error: "currentLevelId is required and must be a valid integer string" },
+        { status: 400 },
+      );
     }
 
-    // 1. Извлекаем вектор текущей картинки
+    // 2. Преобразуем весь массив history (строки) в числа, отфильтровывая некорректные значения
+    const numericHistory = Array.isArray(history)
+      ? history.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id))
+      : [];
+
+    // 3. Извлекаем вектор по числовому ID
     const points = await client.retrieve(COLLECTION_NAME, {
       ids: [currentLevelId],
       with_vector: true,
     });
 
     if (!points || points.length === 0 || !points[0].vector) {
-      return NextResponse.json({ recommendations: getFallbackItems(history, currentLevelId, "noImages") });
+      return NextResponse.json({ recommendations: getFallbackItems(numericHistory, currentLevelId, "noImages") });
     }
 
     const currentVector = points[0].vector;
-    const excludeIds = Array.from(new Set([currentLevelId, ...history]));
+    const excludeIds = Array.from(new Set([currentLevelId, ...numericHistory]));
 
     // 2. Поиск 10 похожих векторов через актуальный метод client.query
     const searchResponse = await client.query(COLLECTION_NAME, {
@@ -56,7 +68,7 @@ export async function POST(request) {
     }));
 
     if (candidateItems.length < 3) {
-      return NextResponse.json({ recommendations: getFallbackItems(history, currentLevelId, "itsOk") });
+      return NextResponse.json({ recommendations: getFallbackItems(numericHistory, currentLevelId, "itsOk") });
     }
 
     // 3. Перемешиваем топ-10 и выбираем 3 элемента
