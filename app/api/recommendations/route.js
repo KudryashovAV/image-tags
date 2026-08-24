@@ -51,7 +51,7 @@ export async function POST(request) {
     const pointsList = searchResponse.points || searchResponse;
 
     const candidateItems = pointsList.map((item) => ({
-      id: item.id,
+      id: item.id.toString(),
       pathId: item.payload?.path_id || null,
     }));
 
@@ -78,7 +78,7 @@ function getFallbackItems(history, currentId, error) {
     if (!exclude.has(randomId) && !result.some((item) => item.id === randomId)) {
       result.push({
         error: error,
-        id: randomId,
+        id: randomId.toString(),
         pathId: `this_is_random_image/${randomId}`,
       });
     }
