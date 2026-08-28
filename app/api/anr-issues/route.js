@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getAnrsDataOnly } from "../fetch-issues/route";
+import { getAnrsDataOnly } from "../../services/googlePlayVitals";
 
 export async function GET(request) {
   let currentStep = "Начало выполнения GET-запроса";

@@ -2,7 +2,6 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { vitalsService } from "../../services/fetchVitals.js";
-// import { filterAndAggregateByType, getIssuesDataOnly } from "../fetch-issues/route";
 import { getIssuesDataOnly, filterAndAggregateByType } from "../../services/googlePlayVitals";
 
 const APP_PACKAGE = "apps/com.openmygame.games.android.jigsaw.solitaire.puzzle";
