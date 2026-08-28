@@ -103,7 +103,7 @@ export async function POST(request) {
     const currentTags = currentPoint.payload?.tags || [];
 
     // Выделяем первые три тега целевого изображения
-    const targetTopThreeTags = Array.isArray(currentTags) ? currentTags.slice(0, 3) : [];
+    const targetTop4Tags = Array.isArray(currentTags) ? currentTags.slice(0, 4) : [];
 
     /**
      * Хелпер для запроса кандидатов из Qdrant с фиксированным отступом (offset)
@@ -169,9 +169,9 @@ export async function POST(request) {
       }
 
       // 2. Исключаем совпадения по первым трем тегам
-      if (targetTopThreeTags.length > 0) {
+      if (targetTop4Tags.length > 0) {
         const itemTags = item.payload?.tags || [];
-        const hasForbiddenTag = targetTopThreeTags.some((tag) => itemTags.includes(tag));
+        const hasForbiddenTag = targetTop4Tags.some((tag) => itemTags.includes(tag));
         if (hasForbiddenTag) {
           return false;
         }
